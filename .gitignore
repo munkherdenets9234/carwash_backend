@@ -1,0 +1,5 @@
+.env
+bin/
+*.exe
+*.log
+__pycache__/

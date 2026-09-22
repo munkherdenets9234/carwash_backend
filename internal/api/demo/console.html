@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Car Wash Demo Console</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #272c36; --text: #e6e8ee;
+    --muted: #9aa3b2; --accent: #4da3ff; --ok: #3ecf8e; --warn: #ffb454; --err: #ff6b6b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f7f9; --panel: #fff; --line: #e2e5ea; --text: #1a1d23;
+      --muted: #5f6775; --accent: #0b6bcb;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 14px 16px; border-bottom: 1px solid var(--line);
+    display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+  }
+  h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  .who { color: var(--muted); font-size: 13px; }
+  .who b { color: var(--ok); }
+  main { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 16px; padding: 16px; align-items: start; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .panel + .panel { margin-top: 14px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input, select, textarea {
+    width: 100%; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  button {
+    padding: 7px 11px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); font: inherit; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  pre {
+    margin: 0; padding: 12px; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; overflow: auto; max-height: 72vh; font-size: 12.5px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .status { font-size: 12px; margin-bottom: 8px; color: var(--muted); }
+  .status .code { font-weight: 700; }
+  .s2 { color: var(--ok); } .s4 { color: var(--warn); } .s5 { color: var(--err); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 12px 0 0; }
+  legend { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding: 0 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Car Wash — demo console</h1>
+  <span class="who" id="who">not signed in</span>
+</header>
+
+<main>
+  <div>
+    <div class="panel">
+      <h2>Sign in</h2>
+      <div class="grid2">
+        <div><label for="email">Email</label><input id="email" value="manager@carwash.mn"></div>
+        <div><label for="password">Password</label><input id="password" type="password" value="manager123"></div>
+      </div>
+      <div class="row">
+        <button class="primary" onclick="login()">Log in</button>
+        <button onclick="fill('manager@carwash.mn','manager123')">Manager</button>
+        <button onclick="fill('bat@carwash.mn','employee123')">Employee</button>
+        <button onclick="fill('customer@example.mn','customer123')">Customer</button>
+        <button onclick="logout()">Log out</button>
+      </div>
+      <div class="hint">Seed these accounts with <code>make seed</code>.</div>
+    </div>
+
+    <div class="panel">
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" onclick="showTab('manager', this)">Manager</button>
+        <button role="tab" aria-selected="false" onclick="showTab('employee', this)">Employee</button>
+        <button role="tab" aria-selected="false" onclick="showTab('customer', this)">Customer</button>
+        <button role="tab" aria-selected="false" onclick="showTab('ops', this)">Ops</button>
+      </div>
+
+      <section id="tab-manager">
+        <h2>Manager</h2>
+        <div class="row">
+          <button onclick="get('/api/v1/manager/staff')">Staff</button>
+          <button onclick="get('/api/v1/manager/customers')">Customers</button>
+          <button onclick="get('/api/v1/manager/services')">Price list</button>
+          <button onclick="get('/api/v1/manager/locations')">Locations</button>
+        </div>
+        <fieldset>
+          <legend>Daily report</legend>
+          <label for="reportDay">Day</label>
+          <input id="reportDay" type="date">
+          <div class="row">
+            <button class="primary" onclick="get('/api/v1/manager/reports/daily?day=' + val('reportDay'))">Run report</button>
+            <button onclick="get('/api/v1/manager/timesheets?from=' + val('reportDay') + '&to=' + val('reportDay'))">Timesheets</button>
+            <button onclick="get('/api/v1/manager/shifts?from=' + val('reportDay') + '&to=' + val('reportDay'))">Roster</button>
+            <button onclick="get('/api/v1/manager/reservations?from=' + val('reportDay') + '&to=' + val('reportDay'))">All bookings</button>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Reassign a job (moves the bonus)</legend>
+          <label for="assignId">Reservation id</label><input id="assignId" placeholder="reservation id">
+          <label for="assignTo">New employee id</label><input id="assignTo" placeholder="employee id">
+          <div class="row">
+            <button onclick="send('PUT','/api/v1/manager/reservations/'+val('assignId')+'/assign',{employee_id: val('assignTo')})">Reassign</button>
+          </div>
+        </fieldset>
+      </section>
+
+      <section id="tab-employee" hidden>
+        <h2>Employee</h2>
+        <div class="row">
+          <button onclick="get('/api/v1/employee/attendance/current')">Am I clocked in?</button>
+          <button onclick="get('/api/v1/employee/jobs')">My jobs today</button>
+          <button onclick="get('/api/v1/employee/shifts')">My shifts</button>
+          <button onclick="get('/api/v1/employee/timesheet')">My timesheet</button>
+        </div>
+        <fieldset>
+          <legend>Time registration (geofenced)</legend>
+          <label for="clockLocation">Location id</label><input id="clockLocation" placeholder="location id">
+          <div class="grid2">
+            <div><label for="lat">Latitude</label><input id="lat" value="47.918730"></div>
+            <div><label for="lng">Longitude</label><input id="lng" value="106.917700"></div>
+          </div>
+          <div class="row">
+            <button onclick="useMyLocation()">Use my GPS</button>
+            <button class="primary" onclick="clockIn()">Clock in</button>
+            <button onclick="clockOut()">Clock out</button>
+          </div>
+          <div class="hint">Clock-in is refused outside the site radius with <code>OUTSIDE_GEOFENCE</code> and the measured distance. Clock-out records the distance but is never refused.</div>
+        </fieldset>
+        <fieldset>
+          <legend>Move a job on</legend>
+          <label for="jobId">Reservation id</label><input id="jobId" placeholder="reservation id">
+          <div class="row">
+            <button onclick="send('PUT','/api/v1/employee/jobs/'+val('jobId')+'/status',{status:'in_progress'})">Start</button>
+            <button class="primary" onclick="send('PUT','/api/v1/employee/jobs/'+val('jobId')+'/status',{status:'completed'})">Complete</button>
+            <button onclick="send('PUT','/api/v1/employee/jobs/'+val('jobId')+'/status',{status:'no_show'})">No show</button>
+          </div>
+        </fieldset>
+      </section>
+
+      <section id="tab-customer" hidden>
+        <h2>Customer</h2>
+        <div class="row">
+          <button onclick="get('/api/v1/customer/cars')">My cars</button>
+          <button onclick="get('/api/v1/customer/employees')">Who can wash</button>
+          <button onclick="get('/api/v1/customer/reservations')">My bookings</button>
+        </div>
+        <fieldset>
+          <legend>Register a car</legend>
+          <div class="grid2">
+            <div><label for="plate">Plate</label><input id="plate" value="1234 UBA"></div>
+            <div><label for="carMake">Make</label><input id="carMake" value="Toyota"></div>
+          </div>
+          <div class="row"><button onclick="send('POST','/api/v1/customer/cars',{plate:val('plate'),make:val('carMake')})">Register</button></div>
+        </fieldset>
+        <fieldset>
+          <legend>Find a time</legend>
+          <label for="availService">Service id</label><input id="availService" placeholder="service id">
+          <label for="availDay">Day</label><input id="availDay" type="date">
+          <div class="row">
+            <button class="primary" onclick="get('/api/v1/customer/availability?service_id='+val('availService')+'&day='+val('availDay'))">Check availability</button>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Book with a chosen employee</legend>
+          <label for="bookEmployee">Employee id</label><input id="bookEmployee" placeholder="employee id">
+          <label for="bookCar">Car id</label><input id="bookCar" placeholder="car id">
+          <label for="bookLocation">Location id</label><input id="bookLocation" placeholder="location id">
+          <label for="bookStart">Start (from the availability response)</label><input id="bookStart" placeholder="2026-09-21T03:00:00Z">
+          <div class="row">
+            <button class="primary" onclick="book()">Book</button>
+            <button onclick="send('POST','/api/v1/customer/reservations/'+val('cancelId')+'/cancel',{})">Cancel</button>
+          </div>
+          <label for="cancelId">Reservation id to cancel</label><input id="cancelId" placeholder="reservation id">
+        </fieldset>
+      </section>
+
+      <section id="tab-ops" hidden>
+        <h2>Operational</h2>
+        <div class="row">
+          <button onclick="get('/healthz')">healthz</button>
+          <button onclick="get('/readyz')">readyz</button>
+          <button onclick="get('/api/v1/services')">Public price list</button>
+          <button onclick="get('/api/v1/locations')">Public locations</button>
+          <button onclick="get('/api/v1/me')">Who am I</button>
+        </div>
+        <div class="hint"><code>readyz</code> names every optional feature and whether this deployment has it.</div>
+      </section>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Response</h2>
+    <div class="status" id="status">—</div>
+    <pre id="out">Sign in, then press a button.</pre>
+  </div>
+</main>
+
+<script>
+let token = null;
+
+const $ = id => document.getElementById(id);
+const val = id => ($(id) ? $(id).value.trim() : '');
+const fill = (e, p) => { $('email').value = e; $('password').value = p; };
+
+function showTab(name, btn) {
+  for (const s of ['manager', 'employee', 'customer', 'ops']) $('tab-' + s).hidden = s !== name;
+  for (const b of document.querySelectorAll('[role=tab]')) b.setAttribute('aria-selected', b === btn);
+}
+
+function render(status, body) {
+  const cls = status >= 500 ? 's5' : status >= 400 ? 's4' : 's2';
+  $('status').innerHTML = 'HTTP <span class="code ' + cls + '">' + status + '</span>';
+  $('out').textContent = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+}
+
+async function call(method, path, body) {
+  const headers = {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  try {
+    const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    const text = await res.text();
+    let parsed = text;
+    try { parsed = JSON.parse(text); } catch (_) { /* leave as text */ }
+    render(res.status, parsed === '' ? '(no content)' : parsed);
+    return { status: res.status, body: parsed };
+  } catch (err) {
+    render(0, 'request failed: ' + err.message);
+    return { status: 0, body: null };
+  }
+}
+
+const get = path => call('GET', path);
+const send = (method, path, body) => call(method, path, body);
+
+async function login() {
+  const r = await call('POST', '/api/v1/auth/login', { email: val('email'), password: val('password') });
+  if (r.status === 200 && r.body && r.body.data) {
+    token = r.body.data.token;
+    const u = r.body.data.user;
+    $('who').innerHTML = 'signed in as <b>' + u.name + '</b> (' + u.role + ')';
+  }
+}
+
+function logout() {
+  token = null;
+  $('who').textContent = 'not signed in';
+  render(0, 'signed out');
+}
+
+function useMyLocation() {
+  if (!navigator.geolocation) return render(0, 'this browser has no geolocation');
+  navigator.geolocation.getCurrentPosition(
+    p => { $('lat').value = p.coords.latitude; $('lng').value = p.coords.longitude; render(0, 'got a fix, accurate to ' + Math.round(p.coords.accuracy) + ' m'); },
+    e => render(0, 'geolocation refused: ' + e.message)
+  );
+}
+
+const clockIn = () => send('POST', '/api/v1/employee/attendance/clock-in',
+  { location_id: val('clockLocation'), lat: parseFloat(val('lat')), lng: parseFloat(val('lng')) });
+
+const clockOut = () => send('POST', '/api/v1/employee/attendance/clock-out',
+  { lat: parseFloat(val('lat')), lng: parseFloat(val('lng')) });
+
+const book = () => send('POST', '/api/v1/customer/reservations', {
+  employee_id: val('bookEmployee'),
+  car_id: val('bookCar'),
+  service_id: val('availService'),
+  location_id: val('bookLocation'),
+  start_at: val('bookStart')
+});
+
+const today = new Date().toISOString().slice(0, 10);
+$('reportDay').value = today;
+$('availDay').value = today;
+</script>
+</body>
+</html>

@@ -1,0 +1,985 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Car Wash API",
+    "version": "1.0.0",
+    "summary": "Bookings, shifts, geofenced attendance and per-wash bonuses.",
+    "description": "Every response is the same envelope: `{ \"success\": true, \"data\": ... }` on success, `{ \"success\": false, \"error\": { \"domain\", \"code\", \"message\" } }` on failure. **Branch on `error.code`, never on `error.message`** — the code is a stable contract, the message is prose and may be reworded or translated.\n\nThe surface is segmented by audience, and the segmentation is the authorisation: `/customer/*`, `/employee/*` and `/manager/*` each admit exactly one role. A token for the wrong role gets `403 FORBIDDEN`, not a filtered response. Response shapes differ by audience on purpose — a customer's reservation carries no `bonus_mnt` and no other customer's phone number, while a staff reservation carries both. They are separate schemas here because they are separate types in the service.\n\n**When mounted into the core platform** as a tenant module, every path below gains the `/carwash` prefix and the `X-API-Key` header, and is additionally gated by the tenant's subscription and module entitlement. Nothing else about the contract changes. See `docs/ADOPTING-INTO-CORE.md`.",
+    "contact": { "name": "Car wash service", "url": "https://example.invalid/carwash" }
+  },
+  "servers": [
+    { "url": "http://localhost:8090", "description": "Local development" },
+    { "url": "{scheme}://{host}", "description": "Any deployment", "variables": {
+      "scheme": { "default": "https", "enum": ["https", "http"] },
+      "host": { "default": "carwash.example.invalid" }
+    }}
+  ],
+  "tags": [
+    { "name": "Operational", "description": "Unversioned. Describes the deployment rather than serving its data." },
+    { "name": "Public", "description": "No credentials. Sign-in and the price list a visitor could read off a wall." },
+    { "name": "Customer", "description": "Requires a customer token." },
+    { "name": "Employee", "description": "Requires an employee token. Every route is scoped to the caller — none takes an employee id." },
+    { "name": "Manager", "description": "Requires a manager token. The only audience that reads other people's data." }
+  ],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": ["Operational"], "operationId": "health", "security": [],
+        "summary": "Is the process up",
+        "description": "Deliberately dependency-free. A health check that queries the database turns a slow query into a restart loop.",
+        "responses": {
+          "200": { "description": "Up", "content": { "application/json": { "schema": {
+            "type": "object", "properties": { "status": { "type": "string", "const": "ok" } }
+          }}}}
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": ["Operational"], "operationId": "readiness", "security": [],
+        "summary": "What this deployment can actually do",
+        "description": "Answers 200 with `degraded: true` rather than a failure status: a deployment missing an optional feature is degraded, not unhealthy, and a 503 here would make an orchestrator restart a process working exactly as configured. Alert on `degraded`.",
+        "responses": {
+          "200": { "description": "Readiness", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" }}}}
+        }
+      }
+    },
+
+    "/api/v1/auth/register": {
+      "post": {
+        "tags": ["Public"], "operationId": "registerCustomer", "security": [],
+        "summary": "Create a customer account and sign in",
+        "description": "Customers only. There is no `role` field: an endpoint that took one would be one validation slip away from letting anyone mint a manager. Staff accounts are created by a manager via `POST /manager/staff`.\n\nRate limited (`AUTH_RATE_PER_MINUTE`).",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RegisterRequest" }}}},
+        "responses": {
+          "201": { "$ref": "#/components/responses/SessionCreated" },
+          "409": { "description": "That email is already registered. Confirms the address exists — an accepted trade for not leaving someone unable to sign in with no explanation; the rate limit is what stops bulk enumeration.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "422": { "$ref": "#/components/responses/ValidationFailed" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": ["Public"], "operationId": "login", "security": [],
+        "summary": "Exchange credentials for a bearer token",
+        "description": "An unknown email and a wrong password return the identical 401, wording included. Distinguishing them turns this into a \"does this person have an account here\" oracle.\n\nRate limited (`AUTH_RATE_PER_MINUTE`); a 429 carries `Retry-After` in seconds.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" }}}},
+        "responses": {
+          "200": { "$ref": "#/components/responses/Session" },
+          "401": { "description": "Invalid email or password", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "403": { "description": "The account is suspended. Checked after the password, so the answer leaks nothing to someone guessing addresses.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/v1/services": {
+      "get": {
+        "tags": ["Public"], "operationId": "listPublicServices", "security": [],
+        "summary": "The active price list",
+        "description": "Active services only, and without `bonus_mnt` — what the company pays its staff per job is not part of a price list. The manager's `GET /manager/services` is a different response type.",
+        "responses": { "200": { "description": "Services", "content": { "application/json": { "schema": {
+          "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/WashService" }}}}]
+        }}}}}
+      }
+    },
+    "/api/v1/locations": {
+      "get": {
+        "tags": ["Public"], "operationId": "listPublicLocations", "security": [],
+        "summary": "The open sites",
+        "description": "Includes each site's coordinate and clock-in radius: the apps need them to show a site on a map and to measure a clock-in against it before asking.",
+        "responses": { "200": { "description": "Locations", "content": { "application/json": { "schema": {
+          "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Location" }}}}]
+        }}}}}
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "tags": ["Public"], "operationId": "me",
+        "summary": "Who am I signed in as",
+        "description": "The one authenticated route that is not audience-specific: any role may call it.",
+        "responses": {
+          "200": { "description": "The caller", "content": { "application/json": { "schema": {
+            "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Me" }}}]
+          }}}},
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+
+    "/api/v1/customer/cars": {
+      "get": {
+        "tags": ["Customer"], "operationId": "listMyCars", "summary": "The caller's own vehicles",
+        "responses": { "200": { "description": "Cars", "content": { "application/json": { "schema": {
+          "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Car" }}}}]
+        }}}}, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }}
+      },
+      "post": {
+        "tags": ["Customer"], "operationId": "registerCar", "summary": "Register a vehicle",
+        "description": "The owner is the authenticated caller; there is no `owner_id` field to point at somebody else. The plate is uppercased and stripped of spaces before storage, and is unique per owner — not globally, because a plate changes hands and refusing the new owner would be a support ticket with no good answer.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CarRequest" }}}},
+        "responses": {
+          "201": { "description": "Created", "content": { "application/json": { "schema": {
+            "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Car" }}}]
+          }}}},
+          "409": { "description": "This owner already has that plate", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "422": { "$ref": "#/components/responses/ValidationFailed" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/v1/customer/cars/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ObjectId" }],
+      "get": {
+        "tags": ["Customer"], "operationId": "getMyCar", "summary": "One of the caller's vehicles",
+        "description": "Scoped to the owner in the query itself. Another customer's car answers **404, not 403** — a 403 would confirm the id is real, which turns id guessing into a census of registered vehicles.",
+        "responses": { "200": { "description": "Car", "content": { "application/json": { "schema": {
+          "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Car" }}}]
+        }}}}, "404": { "$ref": "#/components/responses/NotFound" }}
+      },
+      "put": {
+        "tags": ["Customer"], "operationId": "updateMyCar", "summary": "Edit a vehicle",
+        "description": "Only the fields present are changed; a blank string is treated as \"leave it alone\".",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CarRequest" }}}},
+        "responses": {
+          "200": { "description": "Updated", "content": { "application/json": { "schema": {
+            "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Car" }}}]
+          }}}},
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "This owner already has that plate", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}}
+        }
+      },
+      "delete": {
+        "tags": ["Customer"], "operationId": "deleteMyCar", "summary": "Remove a vehicle",
+        "responses": { "204": { "description": "Removed" }, "404": { "$ref": "#/components/responses/NotFound" }}
+      }
+    },
+    "/api/v1/customer/employees": {
+      "get": {
+        "tags": ["Customer"], "operationId": "listWashers", "summary": "The washers a customer may choose from",
+        "description": "Active employees, as `EmployeeCard` — id and name only. Deliberately not the staff record: a customer choosing a person has no business with that person's email, phone or hire date.",
+        "responses": { "200": { "description": "Washers", "content": { "application/json": { "schema": {
+          "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/EmployeeCard" }}}}]
+        }}}}}
+      }
+    },
+    "/api/v1/customer/availability": {
+      "get": {
+        "tags": ["Customer"], "operationId": "availability", "summary": "Who can do this service, and when",
+        "description": "Derived on read from the roster minus the bookings overlapping it. Slots are anchored to the start of each shift and stepped by `SLOT_STEP_MIN`; a slot is offered only when the whole service duration fits inside the shift and touches no other booking. Slots already in the past are dropped.\n\n**An employee with an empty `slots` array is working but fully booked.** An employee not rostered that day is absent from the list entirely. The two are different answers and a client should show them differently.\n\nRequires authentication rather than being public: it names members of staff and states when each of them works, which is a roster, not a price list.",
+        "parameters": [
+          { "name": "service_id", "in": "query", "required": true, "schema": { "type": "string" }, "description": "Its duration decides the slot length, so there is no meaningful answer without it." },
+          { "name": "day", "in": "query", "schema": { "type": "string", "format": "date" }, "description": "`YYYY-MM-DD` in the business timezone (see `/readyz`). Defaults to today." },
+          { "name": "location_id", "in": "query", "schema": { "type": "string" }},
+          { "name": "employee_id", "in": "query", "schema": { "type": "string" }, "description": "Narrow to one washer — for \"when is Bat next free\"." }
+        ],
+        "responses": {
+          "200": { "description": "Availability", "content": { "application/json": { "schema": {
+            "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/EmployeeAvailability" }}}}]
+          }}}},
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/api/v1/customer/reservations": {
+      "get": {
+        "tags": ["Customer"], "operationId": "listMyReservations", "summary": "The caller's own bookings",
+        "description": "Scoped to the caller in the query. There is no `customer_id` parameter on this route, so there is nothing to tamper with.",
+        "parameters": [{ "$ref": "#/components/parameters/From" }, { "$ref": "#/components/parameters/To" }],
+        "responses": {
+          "200": { "description": "Bookings", "content": { "application/json": { "schema": {
+            "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Reservation" }}}}]
+          }}}},
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      },
+      "post": {
+        "tags": ["Customer"], "operationId": "book", "summary": "Book a wash with a chosen washer",
+        "description": "Availability is **re-derived server-side** rather than trusting the slot list the client was shown, which may be minutes stale. On top of that, a unique index on (employee, start instant) makes the database refuse the second of two simultaneous bookings for the same slot.\n\n`price_mnt` and `bonus_mnt` are copied onto the booking at this moment and never read through afterwards: editing the price list must not rewrite revenue already banked or a bonus already earned.\n\nRate limited (`BOOKING_RATE_PER_MINUTE`).",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BookRequest" }}}},
+        "responses": {
+          "201": { "$ref": "#/components/responses/ReservationCreated" },
+          "404": { "description": "The car is not the caller's, or the service, location or employee does not exist", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "409": { "$ref": "#/components/responses/SlotUnavailable" },
+          "422": { "$ref": "#/components/responses/ValidationFailed" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/v1/customer/reservations/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ObjectId" }],
+      "get": {
+        "tags": ["Customer"], "operationId": "getMyReservation", "summary": "One of the caller's bookings",
+        "responses": { "200": { "$ref": "#/components/responses/ReservationOk" }, "404": { "$ref": "#/components/responses/NotFound" }}
+      }
+    },
+    "/api/v1/customer/reservations/{id}/cancel": {
+      "parameters": [{ "$ref": "#/components/parameters/ObjectId" }],
+      "post": {
+        "tags": ["Customer"], "operationId": "cancelMyReservation", "summary": "Withdraw a booking",
+        "description": "Frees the slot for someone else. Only an open booking can be cancelled; a completed wash answers 409.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/ReservationOk" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "It can no longer be cancelled", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}}
+        }
+      }
+    },
+
+    "/api/v1/employee/attendance/current": {
+      "get": {
+        "tags": ["Employee"], "operationId": "currentTimeEntry", "summary": "Am I clocked in",
+        "description": "**Not clocked in is `200` with `data: null`, not 404.** It is an ordinary state the app renders a button for; making the normal case an error status forces every client to special-case it.",
+        "responses": { "200": { "description": "The running entry, or null", "content": { "application/json": { "schema": {
+          "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "oneOf": [{ "$ref": "#/components/schemas/TimeEntry" }, { "type": "null" }] }}}]
+        }}}}}
+      }
+    },
+    "/api/v1/employee/attendance/clock-in": {
+      "post": {
+        "tags": ["Employee"], "operationId": "clockIn", "summary": "Start a shift, if you are on site",
+        "description": "Refused outside the site's `geofence_radius_m` with **`422 OUTSIDE_GEOFENCE`**, and the message carries the measured and permitted distances — so a client can say \"you are 240 m away\" rather than \"invalid request\". Five metres over is GPS drift worth waiting out; three kilometres is the wrong branch, and only the number distinguishes them.\n\nA coordinate of exactly `(0, 0)` is treated as \"no fix yet\" and reported as a validation failure, not as being far away: a phone without a fix reports Null Island, and telling that person they are at the wrong site is a lie.\n\nAt most one open entry per employee, enforced by a unique index as well as a service check — a read-then-write races with itself when two taps arrive together.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClockInRequest" }}}},
+        "responses": {
+          "201": { "description": "Clocked in", "content": { "application/json": { "schema": {
+            "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/TimeEntry" }}}]
+          }}}},
+          "409": { "description": "Already clocked in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "422": { "$ref": "#/components/responses/OutsideGeofence" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/v1/employee/attendance/clock-out": {
+      "post": {
+        "tags": ["Employee"], "operationId": "clockOut", "summary": "End the running shift",
+        "description": "**Never refused for being far from the site.** The distance is measured and stored, but blocking it would leave someone who has already gone home clocked in indefinitely, inflating their hours and needing a manager to fix by hand. A clock-out from the wrong place is a question for a person to look at, which is what recording the distance makes possible.\n\n`clock_out_distance_m` is `-1` when the device gave no usable fix — not `0`, which would read as standing exactly on the site.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClockOutRequest" }}}},
+        "responses": {
+          "200": { "description": "Clocked out", "content": { "application/json": { "schema": {
+            "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/TimeEntry" }}}]
+          }}}},
+          "409": { "description": "Not clocked in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/v1/employee/timesheet": {
+      "get": {
+        "tags": ["Employee"], "operationId": "myTimesheet", "summary": "The caller's own hours",
+        "description": "Same response type as the manager's `GET /manager/timesheets`, deliberately: a manager reviewing a disputed shift should be looking at the record the employee is looking at, distances included.\n\nAn open entry contributes zero minutes and is counted separately in `open_entries` — a timesheet that reads low usually has one, and folding it into the total hides the reason.",
+        "parameters": [{ "$ref": "#/components/parameters/From" }, { "$ref": "#/components/parameters/To" }],
+        "responses": { "200": { "$ref": "#/components/responses/TimesheetOk" }, "422": { "$ref": "#/components/responses/ValidationFailed" }}
+      }
+    },
+    "/api/v1/employee/shifts": {
+      "get": {
+        "tags": ["Employee"], "operationId": "myShifts", "summary": "The caller's own roster",
+        "parameters": [{ "$ref": "#/components/parameters/From" }, { "$ref": "#/components/parameters/To" }],
+        "responses": { "200": { "$ref": "#/components/responses/ShiftsOk" }}
+      }
+    },
+    "/api/v1/employee/jobs": {
+      "get": {
+        "tags": ["Employee"], "operationId": "myJobs", "summary": "The caller's own jobs",
+        "description": "Returned as `StaffReservation`: the same booking the customer sees, plus what it pays and the customer's number to call if they are late. Both are appropriate here and neither appears on the customer's own view.",
+        "parameters": [{ "$ref": "#/components/parameters/From" }, { "$ref": "#/components/parameters/To" }],
+        "responses": { "200": { "$ref": "#/components/responses/StaffReservationsOk" }}
+      }
+    },
+    "/api/v1/employee/jobs/{id}/status": {
+      "parameters": [{ "$ref": "#/components/parameters/ObjectId" }],
+      "put": {
+        "tags": ["Employee"], "operationId": "setMyJobStatus", "summary": "Move one of the caller's own jobs on",
+        "description": "Confined to the caller's own work: another employee's booking answers 404, the same as one that does not exist. Without that, any employee could mark any other's wash complete, crediting the bonus to the wrong person invisibly until payroll.\n\nTransitions: `booked` → `in_progress` | `completed` | `cancelled` | `no_show`; `in_progress` → `completed` | `cancelled`. Everything else is terminal, because each of those has already affected a report. Completing writes `completed_at`, which is what the daily report groups on.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatusRequest" }}}},
+        "responses": {
+          "200": { "$ref": "#/components/responses/StaffReservationOk" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "That transition is not allowed from the current status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}}
+        }
+      }
+    },
+
+    "/api/v1/manager/staff": {
+      "get": {
+        "tags": ["Manager"], "operationId": "listStaff", "summary": "Managers and washers",
+        "responses": { "200": { "$ref": "#/components/responses/StaffMembersOk" }}
+      },
+      "post": {
+        "tags": ["Manager"], "operationId": "createStaff", "summary": "Add a washer or a manager",
+        "description": "`role` is a field here, unlike on public registration, because the caller is already a manager. `customer` is still refused: an account created by someone else, with a password that person chose, is not an account that customer agreed to.\n\nAn employee requires `home_location_id`, and it is checked against the collection — an employee rostered to a site that does not exist passes every later check and then fails at clock-in, far from the cause.\n\nRate limited (`AUTH_RATE_PER_MINUTE`), since it sets a password.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateStaffRequest" }}}},
+        "responses": {
+          "201": { "description": "Created", "content": { "application/json": { "schema": {
+            "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/StaffMember" }}}]
+          }}}},
+          "404": { "description": "The home location does not exist", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "409": { "description": "That email is already registered", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/api/v1/manager/staff/{id}/status": {
+      "parameters": [{ "$ref": "#/components/parameters/ObjectId" }],
+      "put": {
+        "tags": ["Manager"], "operationId": "setUserStatus", "summary": "Suspend or reinstate an account",
+        "description": "Takes effect on the target's **next request**, not on their next login: the auth middleware loads the user from the database on every call rather than trusting the token's claims. Suspension that waits for a token to expire is not suspension.\n\nA manager suspending their own account is refused — it locks the business out of its own back office and the fix needs database access.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UserStatusRequest" }}}},
+        "responses": {
+          "204": { "description": "Changed" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "description": "Unknown status, or a manager suspending themselves", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}}
+        }
+      }
+    },
+    "/api/v1/manager/customers": {
+      "get": {
+        "tags": ["Manager"], "operationId": "listCustomers", "summary": "Every customer, with contact details",
+        "description": "The one route that returns a list of customers with their email and phone. Manager-only for that reason.",
+        "responses": { "200": { "$ref": "#/components/responses/StaffMembersOk" }}
+      }
+    },
+    "/api/v1/manager/services": {
+      "get": {
+        "tags": ["Manager"], "operationId": "listStaffServices", "summary": "The whole price list",
+        "description": "Withdrawn entries included — the likeliest reason to open this screen is to bring one back — and with `bonus_mnt`, which the public list omits.",
+        "responses": { "200": { "$ref": "#/components/responses/StaffServicesOk" }}
+      },
+      "post": {
+        "tags": ["Manager"], "operationId": "createService", "summary": "Add a service",
+        "description": "`bonus_mnt` above `price_mnt` is refused: it means every completed wash loses money, which is almost always a missing or extra zero, and catching it here is cheaper than finding it in a month of payroll.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WashServiceRequest" }}}},
+        "responses": {
+          "201": { "$ref": "#/components/responses/StaffServiceCreated" },
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/api/v1/manager/services/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ObjectId" }],
+      "put": {
+        "tags": ["Manager"], "operationId": "updateService", "summary": "Edit a service",
+        "description": "Changing a price leaves every existing booking untouched — each copied the price it was sold at. Yesterday's report will not move. Setting `active: false` removes it from the customer app immediately and leaves the history intact.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WashServiceRequest" }}}},
+        "responses": {
+          "200": { "$ref": "#/components/responses/StaffServiceOk" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/api/v1/manager/locations": {
+      "get": {
+        "tags": ["Manager"], "operationId": "listAllLocations", "summary": "Every site, open or closed",
+        "responses": { "200": { "$ref": "#/components/responses/LocationsOk" }}
+      },
+      "post": {
+        "tags": ["Manager"], "operationId": "createLocation", "summary": "Add a site",
+        "description": "`geofence_radius_m` must be between 25 and 1000. The floor exists because consumer GPS is routinely 10–20 m out and worse beside a building: a tighter fence is not a strict policy, it is a clock-in that fails at random for people standing in the right place. Past a kilometre the fence stops meaning \"at work\" and starts meaning \"in the district\".",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LocationRequest" }}}},
+        "responses": {
+          "201": { "$ref": "#/components/responses/LocationCreated" },
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/api/v1/manager/locations/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ObjectId" }],
+      "put": {
+        "tags": ["Manager"], "operationId": "updateLocation", "summary": "Edit a site",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LocationRequest" }}}},
+        "responses": {
+          "200": { "$ref": "#/components/responses/LocationOk" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/api/v1/manager/shifts": {
+      "get": {
+        "tags": ["Manager"], "operationId": "listShifts", "summary": "The roster",
+        "description": "Returns shifts that **overlap** the window, not shifts that start inside it. The difference shows on a 22:00–02:00 shift: asking which shifts start today drops it from tomorrow, even though tomorrow's first two hours are covered — and availability is built from this list, so the employee would look unbookable for hours they are working.",
+        "parameters": [
+          { "$ref": "#/components/parameters/From" }, { "$ref": "#/components/parameters/To" },
+          { "name": "employee_id", "in": "query", "schema": { "type": "string" }},
+          { "name": "location_id", "in": "query", "schema": { "type": "string" }}
+        ],
+        "responses": { "200": { "$ref": "#/components/responses/ShiftsOk" }}
+      },
+      "post": {
+        "tags": ["Manager"], "operationId": "addShift", "summary": "Roster someone",
+        "description": "Its slots become bookable at once — the roster is the only source of availability. One employee cannot hold two overlapping shifts: the second is refused, because a roster that says otherwise offers bookings at both sites. A shift longer than 16 hours is refused as a probable wrong date on the end time.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ShiftRequest" }}}},
+        "responses": {
+          "201": { "$ref": "#/components/responses/ShiftCreated" },
+          "404": { "description": "The employee or location does not exist", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "409": { "description": "That employee already has an overlapping shift", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/api/v1/manager/shifts/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ObjectId" }],
+      "delete": {
+        "tags": ["Manager"], "operationId": "deleteShift", "summary": "Remove a shift",
+        "description": "Its slots stop being offered immediately. Bookings already taken inside it are **not** cancelled — that is a decision for a person, not a side effect of editing a roster.",
+        "responses": { "204": { "description": "Removed" }, "404": { "$ref": "#/components/responses/NotFound" }}
+      }
+    },
+    "/api/v1/manager/reservations": {
+      "get": {
+        "tags": ["Manager"], "operationId": "listAllReservations", "summary": "Every booking",
+        "description": "Unlike the employee's own list, this one takes `employee_id`: seeing anyone's work is the manager's job.",
+        "parameters": [
+          { "$ref": "#/components/parameters/From" }, { "$ref": "#/components/parameters/To" },
+          { "name": "employee_id", "in": "query", "schema": { "type": "string" }},
+          { "name": "customer_id", "in": "query", "schema": { "type": "string" }},
+          { "name": "location_id", "in": "query", "schema": { "type": "string" }},
+          { "name": "status", "in": "query", "schema": { "$ref": "#/components/schemas/ReservationStatus" }}
+        ],
+        "responses": { "200": { "$ref": "#/components/responses/StaffReservationsOk" }}
+      }
+    },
+    "/api/v1/manager/reservations/{id}/assign": {
+      "parameters": [{ "$ref": "#/components/parameters/ObjectId" }],
+      "put": {
+        "tags": ["Manager"], "operationId": "reassignReservation", "summary": "Hand an open job to a different washer",
+        "description": "This is the point at which the bonus changes hands, which is why it is manager-only. Availability is re-checked for the new washer, so an off-shift or already-booked target is refused with `409 SLOT_UNAVAILABLE` saying which.\n\n**A completed job cannot be reassigned.** The bonus has already been earned by whoever did the work, and moving it would silently change a report someone has already read.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AssignRequest" }}}},
+        "responses": {
+          "200": { "$ref": "#/components/responses/StaffReservationOk" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Not an open booking, or the new washer is not free", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/api/v1/manager/reservations/{id}/status": {
+      "parameters": [{ "$ref": "#/components/parameters/ObjectId" }],
+      "put": {
+        "tags": ["Manager"], "operationId": "setAnyJobStatus", "summary": "Move any booking on",
+        "description": "Same state machine as the employee route, without the own-work restriction.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatusRequest" }}}},
+        "responses": {
+          "200": { "$ref": "#/components/responses/StaffReservationOk" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "That transition is not allowed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}}
+        }
+      }
+    },
+    "/api/v1/manager/timesheets": {
+      "get": {
+        "tags": ["Manager"], "operationId": "allTimesheets", "summary": "Anyone's hours",
+        "description": "The same response type the employee sees of themselves, across everybody and filterable.",
+        "parameters": [
+          { "$ref": "#/components/parameters/From" }, { "$ref": "#/components/parameters/To" },
+          { "name": "employee_id", "in": "query", "schema": { "type": "string" }},
+          { "name": "location_id", "in": "query", "schema": { "type": "string" }}
+        ],
+        "responses": { "200": { "$ref": "#/components/responses/TimesheetOk" }, "422": { "$ref": "#/components/responses/ValidationFailed" }}
+      }
+    },
+    "/api/v1/manager/reports/daily": {
+      "get": {
+        "tags": ["Manager"], "operationId": "dailyReport", "summary": "The end-of-day figure",
+        "description": "Grouped on `completed_at`, **not** on booking time: a wash booked for 17:45 and finished at 18:20 belongs to the day it was paid for, and a job that ran past midnight belongs to the day it finished. Reporting by booking time would put revenue on a day no money was taken.\n\nEmployees who were on site but completed nothing still appear, with zero washes — dropping them would make this a list of today's earners rather than today's staff. `worked_minutes` and `washes` are independent figures and neither is derived from the other; an employee still clocked in shows zero minutes with washes on the board.\n\nRows are ordered by revenue then id, so the order is stable across refreshes.",
+        "parameters": [{ "name": "day", "in": "query", "schema": { "type": "string", "format": "date" }, "description": "`YYYY-MM-DD` in the business timezone. Defaults to today." }],
+        "responses": {
+          "200": { "description": "The day", "content": { "application/json": { "schema": {
+            "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/DailyReport" }}}]
+          }}}},
+          "400": { "description": "`day` is not a date", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}}
+        }
+      }
+    }
+  },
+
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http", "scheme": "bearer", "bearerFormat": "JWT",
+        "description": "From `POST /api/v1/auth/login`. The claim set is only the subject and role; the role is re-read from the database on every request, so a change of role or a suspension takes effect on the next call rather than the next login."
+      }
+    },
+    "parameters": {
+      "ObjectId": {
+        "name": "id", "in": "path", "required": true,
+        "schema": { "type": "string", "pattern": "^[0-9a-fA-F]{24}$" },
+        "description": "A 24-character hex MongoDB ObjectId."
+      },
+      "From": {
+        "name": "from", "in": "query",
+        "schema": { "type": "string", "format": "date" },
+        "description": "`YYYY-MM-DD` in the business timezone. Defaults to today."
+      },
+      "To": {
+        "name": "to", "in": "query",
+        "schema": { "type": "string", "format": "date" },
+        "description": "`YYYY-MM-DD`, **inclusive** — 1st to 7th contains the 7th. Defaults to `from`. The window may not exceed 92 days; an unbounded range is a collection scan one bookmarked URL can repeat all day."
+      }
+    },
+    "responses": {
+      "Unauthorized": { "description": "Missing, malformed or expired token", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+      "Forbidden": { "description": "Authenticated, but the wrong role for this audience — or the account is suspended. Carries no detail: telling a customer that a route needs the manager role maps the private surface for them.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+      "NotFound": { "description": "No such row, or it belongs to someone else — the two are deliberately indistinguishable on owner-scoped routes", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+      "ValidationFailed": { "description": "The body parsed but its values are not acceptable", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}},
+      "RateLimited": {
+        "description": "Too many requests from this client. `Retry-After` gives the wait in seconds.",
+        "headers": { "Retry-After": { "schema": { "type": "integer" }, "description": "Seconds to wait." }},
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}
+      },
+      "OutsideGeofence": {
+        "description": "Too far from the site to clock in. `error.code` is `OUTSIDE_GEOFENCE` and `error.message` carries both the measured and the permitted distance. Distinct from a plain validation failure because the client acts on it differently: the right response is \"move closer\", not \"fix your input\".",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}
+      },
+      "SlotUnavailable": {
+        "description": "The washer is not free for the whole window — off shift, already booked, or the service would run past the end of their shift. `error.code` is `SLOT_UNAVAILABLE`.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }}}
+      },
+      "Session": { "description": "Signed in", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Session" }}}]
+      }}}},
+      "SessionCreated": { "description": "Registered and signed in", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Session" }}}]
+      }}}},
+      "ReservationOk": { "description": "The booking", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Reservation" }}}]
+      }}}},
+      "ReservationCreated": { "description": "Booked", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Reservation" }}}]
+      }}}},
+      "StaffReservationOk": { "description": "The booking, staff view", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/StaffReservation" }}}]
+      }}}},
+      "StaffReservationsOk": { "description": "Bookings, staff view", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/StaffReservation" }}}}]
+      }}}},
+      "StaffMembersOk": { "description": "People", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/StaffMember" }}}}]
+      }}}},
+      "StaffServicesOk": { "description": "Services, staff view", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/StaffWashService" }}}}]
+      }}}},
+      "StaffServiceOk": { "description": "The service", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/StaffWashService" }}}]
+      }}}},
+      "StaffServiceCreated": { "description": "Created", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/StaffWashService" }}}]
+      }}}},
+      "LocationsOk": { "description": "Sites", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Location" }}}}]
+      }}}},
+      "LocationOk": { "description": "The site", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Location" }}}]
+      }}}},
+      "LocationCreated": { "description": "Created", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Location" }}}]
+      }}}},
+      "ShiftsOk": { "description": "Shifts", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "type": "array", "items": { "$ref": "#/components/schemas/Shift" }}}}]
+      }}}},
+      "ShiftCreated": { "description": "Created", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Shift" }}}]
+      }}}},
+      "TimesheetOk": { "description": "The timesheet", "content": { "application/json": { "schema": {
+        "allOf": [{ "$ref": "#/components/schemas/Envelope" }, { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Timesheet" }}}]
+      }}}}
+    },
+    "schemas": {
+      "Envelope": {
+        "type": "object", "required": ["success"],
+        "properties": {
+          "success": { "type": "boolean", "const": true },
+          "data": {},
+          "message": { "type": "string" }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object", "required": ["success", "error"],
+        "properties": {
+          "success": { "type": "boolean", "const": false },
+          "message": { "type": "string", "description": "Kept alongside `error` because existing clients read it. New clients branch on `error.code`." },
+          "error": { "$ref": "#/components/schemas/ApiError" }
+        }
+      },
+      "ApiError": {
+        "type": "object", "required": ["domain", "code", "message"],
+        "properties": {
+          "domain": { "type": "string", "description": "The subsystem the failure came from. Useful for alerting: \"every 5xx today is ATTENDANCE\" is far more actionable than \"the API is throwing 500s\".", "enum": ["GENERAL", "AUTH", "DB", "CATALOG", "SCHEDULE", "RESERVATION", "ATTENDANCE"] },
+          "code": { "$ref": "#/components/schemas/ErrorCode" },
+          "message": { "type": "string", "description": "Prose. Safe to show a user; never branch on it." },
+          "stack_trace": { "type": "string", "description": "Development only. Never present in production." }
+        }
+      },
+      "ErrorCode": {
+        "type": "string",
+        "description": "The closed set of codes this API returns. Clients branch on these.",
+        "enum": [
+          "INTERNAL_ERROR", "BAD_REQUEST", "UNAUTHORIZED", "FORBIDDEN", "NOT_FOUND",
+          "CONFLICT", "VALIDATION_FAILED", "UPSTREAM_ERROR", "RATE_LIMITED",
+          "FEATURE_UNAVAILABLE", "OUTSIDE_GEOFENCE", "SLOT_UNAVAILABLE"
+        ]
+      },
+      "Readiness": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string" },
+          "env": { "type": "string", "examples": ["development", "production"] },
+          "timezone": { "type": "string", "description": "The IANA zone every report and `?day=` is cut on. Clients must format dates in this zone, not the browser's.", "examples": ["Asia/Ulaanbaatar"] },
+          "degraded": { "type": "boolean", "description": "True when any optional feature is switched off. Alert on this: silent degradation is how a feature stays off for a week with nobody noticing." },
+          "features": { "type": "array", "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "enabled": { "type": "boolean" },
+              "detail": { "type": "string", "description": "Present only when disabled. Names the variable to set, not the symptom." }
+            }
+          }}
+        }
+      },
+
+      "Role": { "type": "string", "enum": ["manager", "employee", "customer"] },
+      "UserStatus": { "type": "string", "enum": ["active", "suspended"] },
+      "ObjectId": { "type": "string", "pattern": "^[0-9a-fA-F]{24}$" },
+      "MNT": { "type": "integer", "format": "int64", "description": "Whole tugrik. There is no minor unit and no scaling factor — the integer IS the amount. Never a float: the daily report sums hundreds of these and rounding would show up in the line an employee reads to check their own bonus." },
+
+      "Me": {
+        "type": "object",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ObjectId" },
+          "role": { "$ref": "#/components/schemas/Role" },
+          "name": { "type": "string" },
+          "email": { "type": "string", "format": "email" },
+          "phone": { "type": "string" },
+          "home_location_id": { "$ref": "#/components/schemas/ObjectId" }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "token": { "type": "string", "description": "Bearer token." },
+          "expires_at": { "type": "string", "format": "date-time" },
+          "user": { "$ref": "#/components/schemas/Me" }
+        }
+      },
+      "EmployeeCard": {
+        "type": "object",
+        "description": "An employee as a CUSTOMER sees them: enough to choose a person, and nothing more.",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ObjectId" },
+          "name": { "type": "string" }
+        }
+      },
+      "StaffMember": {
+        "type": "object",
+        "description": "A person as a MANAGER sees them — the full personnel record. Never returned on a customer route.",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ObjectId" },
+          "role": { "$ref": "#/components/schemas/Role" },
+          "name": { "type": "string" },
+          "email": { "type": "string", "format": "email" },
+          "phone": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/UserStatus" },
+          "home_location_id": { "$ref": "#/components/schemas/ObjectId" },
+          "hired_at": { "type": "string", "format": "date-time" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+
+      "Location": {
+        "type": "object",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ObjectId" },
+          "name": { "type": "string" },
+          "address": { "type": "string" },
+          "lat": { "type": "number", "format": "double" },
+          "lng": { "type": "number", "format": "double" },
+          "geofence_radius_m": { "type": "number", "description": "How far from (lat, lng) a clock-in is accepted. Per-site, not a global constant: a forecourt works at 75 m while a bay inside a shopping centre needs 200 m before honest staff start failing on indoor GPS drift." },
+          "active": { "type": "boolean" }
+        }
+      },
+      "WashService": {
+        "type": "object",
+        "description": "A service as a CUSTOMER sees it. No bonus.",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ObjectId" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "duration_min": { "type": "integer", "description": "Drives availability: a slot is offered only when this whole duration fits inside a shift." },
+          "price_mnt": { "$ref": "#/components/schemas/MNT" },
+          "active": { "type": "boolean" }
+        }
+      },
+      "StaffWashService": {
+        "allOf": [
+          { "$ref": "#/components/schemas/WashService" },
+          { "type": "object", "properties": { "bonus_mnt": { "$ref": "#/components/schemas/MNT" } },
+            "description": "What the assigned employee earns for completing one. A flat amount per wash rather than a percentage of the price: the employee does the same work whether or not the customer had a discount, and a percentage makes every price change silently a pay change." }
+        ]
+      },
+
+      "Car": {
+        "type": "object",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ObjectId" },
+          "plate": { "type": "string", "description": "Stored uppercase, no spaces." },
+          "make": { "type": "string" },
+          "model": { "type": "string" },
+          "color": { "type": "string" },
+          "notes": { "type": "string", "description": "The owner's own note. Absent from CarBrief, which staff see — it is a note to self, not an instruction to the washer." },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CarBrief": {
+        "type": "object",
+        "description": "The vehicle on a job card: what staff need to find it in the queue.",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ObjectId" },
+          "plate": { "type": "string" },
+          "make": { "type": "string" },
+          "model": { "type": "string" },
+          "color": { "type": "string" }
+        }
+      },
+
+      "NamedRef": {
+        "type": "object",
+        "description": "An id with the label a UI shows for it, so a client needs no second map to render a list.",
+        "properties": { "id": { "$ref": "#/components/schemas/ObjectId" }, "name": { "type": "string" }}
+      },
+      "ReservationStatus": {
+        "type": "string",
+        "enum": ["booked", "in_progress", "completed", "cancelled", "no_show"]
+      },
+      "Reservation": {
+        "type": "object",
+        "description": "A booking as its own CUSTOMER sees it. **`bonus_mnt` is absent, and that is why this schema exists separately from StaffReservation** — what the company pays the washer is between the company and the washer.",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ObjectId" },
+          "status": { "$ref": "#/components/schemas/ReservationStatus" },
+          "start_at": { "type": "string", "format": "date-time" },
+          "end_at": { "type": "string", "format": "date-time" },
+          "service": { "$ref": "#/components/schemas/NamedRef" },
+          "employee": { "$ref": "#/components/schemas/NamedRef" },
+          "location": { "$ref": "#/components/schemas/NamedRef" },
+          "car": { "$ref": "#/components/schemas/CarBrief" },
+          "price_mnt": { "$ref": "#/components/schemas/MNT" },
+          "notes": { "type": "string" },
+          "completed_at": { "type": "string", "format": "date-time" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "StaffReservation": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Reservation" },
+          {
+            "type": "object",
+            "description": "The same job as an EMPLOYEE or MANAGER sees it: what it pays, and who to call. Never returned on a customer route — it carries another customer's phone number.",
+            "properties": {
+              "bonus_mnt": { "$ref": "#/components/schemas/MNT" },
+              "customer": {
+                "type": "object",
+                "properties": {
+                  "id": { "$ref": "#/components/schemas/ObjectId" },
+                  "name": { "type": "string" },
+                  "phone": { "type": "string" }
+                }
+              }
+            }
+          }
+        ]
+      },
+
+      "Slot": {
+        "type": "object",
+        "properties": {
+          "start_at": { "type": "string", "format": "date-time" },
+          "end_at": { "type": "string", "format": "date-time" },
+          "location_id": { "$ref": "#/components/schemas/ObjectId" }
+        }
+      },
+      "EmployeeAvailability": {
+        "type": "object",
+        "properties": {
+          "employee": { "$ref": "#/components/schemas/EmployeeCard" },
+          "slots": {
+            "type": "array", "items": { "$ref": "#/components/schemas/Slot" },
+            "description": "Always an array, never null. **Empty means working but fully booked** — someone not rostered that day is absent from the enclosing list instead."
+          }
+        }
+      },
+      "Shift": {
+        "type": "object",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ObjectId" },
+          "employee": { "$ref": "#/components/schemas/NamedRef" },
+          "location": { "$ref": "#/components/schemas/NamedRef" },
+          "start_at": { "type": "string", "format": "date-time" },
+          "end_at": { "type": "string", "format": "date-time" }
+        }
+      },
+
+      "TimeEntry": {
+        "type": "object",
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ObjectId" },
+          "employee": { "$ref": "#/components/schemas/NamedRef" },
+          "location": { "$ref": "#/components/schemas/NamedRef" },
+          "clock_in_at": { "type": "string", "format": "date-time" },
+          "clock_in_distance_m": { "type": "number", "description": "Metres from the site when clocking in. Kept, not just the pass/fail verdict: when someone disputes a rejected clock-in the only useful record is where the phone said they were." },
+          "clock_out_at": { "type": "string", "format": "date-time" },
+          "clock_out_distance_m": { "type": "number", "description": "`-1` when the device gave no usable fix — not `0`, which would read as standing on the site." },
+          "worked_minutes": { "type": "integer", "description": "Written once, at clock-out. Zero while the entry is running." },
+          "running": { "type": "boolean" }
+        }
+      },
+      "Timesheet": {
+        "type": "object",
+        "properties": {
+          "from": { "type": "string", "format": "date-time" },
+          "to": { "type": "string", "format": "date-time" },
+          "entries": { "type": "array", "items": { "$ref": "#/components/schemas/TimeEntry" }},
+          "total_entries": { "type": "integer" },
+          "worked_minutes": { "type": "integer" },
+          "worked_hours": { "type": "number" },
+          "open_entries": { "type": "integer", "description": "Surfaced rather than folded into the total. An open entry contributes zero minutes, so a timesheet with one reads low for a reason the reader cannot otherwise see — and the usual cause is somebody who forgot to clock out." }
+        }
+      },
+
+      "EmployeeDaily": {
+        "type": "object",
+        "properties": {
+          "employee_id": { "$ref": "#/components/schemas/ObjectId" },
+          "name": { "type": "string", "description": "`(removed employee)` when the account is gone — a deleted employee still owns the work they did." },
+          "washes": { "type": "integer" },
+          "revenue_mnt": { "$ref": "#/components/schemas/MNT" },
+          "bonus_mnt": { "$ref": "#/components/schemas/MNT" },
+          "worked_minutes": { "type": "integer", "description": "From the timesheet, not from the washes. Zero with washes on the board means the entry is still open." },
+          "worked_hours": { "type": "number" }
+        }
+      },
+      "DailyReport": {
+        "type": "object",
+        "properties": {
+          "day": { "type": "string", "format": "date", "description": "Echoed as `YYYY-MM-DD`, not a timestamp: a client that re-derives the date in its own timezone would display a different day than it asked for." },
+          "washes": { "type": "integer" },
+          "revenue_mnt": { "$ref": "#/components/schemas/MNT" },
+          "bonus_mnt": { "$ref": "#/components/schemas/MNT" },
+          "net_mnt": { "$ref": "#/components/schemas/MNT", "description": "Revenue less bonus. Carried rather than left to the client to subtract, so two clients cannot disagree about it." },
+          "employees": { "type": "array", "items": { "$ref": "#/components/schemas/EmployeeDaily" }}
+        }
+      },
+
+      "RegisterRequest": {
+        "type": "object", "required": ["name", "email", "password"],
+        "properties": {
+          "name": { "type": "string" },
+          "email": { "type": "string", "format": "email" },
+          "phone": { "type": "string" },
+          "password": { "type": "string", "minLength": 8, "format": "password" }
+        }
+      },
+      "LoginRequest": {
+        "type": "object", "required": ["email", "password"],
+        "properties": {
+          "email": { "type": "string", "format": "email" },
+          "password": { "type": "string", "format": "password" }
+        }
+      },
+      "CarRequest": {
+        "type": "object",
+        "properties": {
+          "plate": { "type": "string", "maxLength": 16 },
+          "make": { "type": "string" },
+          "model": { "type": "string" },
+          "color": { "type": "string" },
+          "notes": { "type": "string" }
+        }
+      },
+      "BookRequest": {
+        "type": "object", "required": ["employee_id", "car_id", "service_id", "location_id", "start_at"],
+        "properties": {
+          "employee_id": { "$ref": "#/components/schemas/ObjectId", "description": "Chosen by the customer. This is what ties the bonus to a person." },
+          "car_id": { "$ref": "#/components/schemas/ObjectId", "description": "Must belong to the caller." },
+          "service_id": { "$ref": "#/components/schemas/ObjectId" },
+          "location_id": { "$ref": "#/components/schemas/ObjectId" },
+          "start_at": { "type": "string", "format": "date-time", "description": "RFC 3339. Must be in the future and within `MAX_BOOKING_DAYS_AHEAD`. Use a `start_at` taken from an availability slot." },
+          "notes": { "type": "string" }
+        }
+      },
+      "StatusRequest": {
+        "type": "object", "required": ["status"],
+        "properties": { "status": { "$ref": "#/components/schemas/ReservationStatus" }}
+      },
+      "AssignRequest": {
+        "type": "object", "required": ["employee_id"],
+        "properties": { "employee_id": { "$ref": "#/components/schemas/ObjectId" }}
+      },
+      "ClockInRequest": {
+        "type": "object", "required": ["location_id", "lat", "lng"],
+        "properties": {
+          "location_id": { "$ref": "#/components/schemas/ObjectId" },
+          "lat": { "type": "number", "format": "double", "minimum": -90, "maximum": 90 },
+          "lng": { "type": "number", "format": "double", "minimum": -180, "maximum": 180 }
+        }
+      },
+      "ClockOutRequest": {
+        "type": "object",
+        "description": "Coordinates are recorded but never gate the call.",
+        "properties": {
+          "lat": { "type": "number", "format": "double" },
+          "lng": { "type": "number", "format": "double" }
+        }
+      },
+      "CreateStaffRequest": {
+        "type": "object", "required": ["role", "name", "email", "password"],
+        "properties": {
+          "role": { "type": "string", "enum": ["manager", "employee"], "description": "`customer` is refused — customers sign themselves up." },
+          "name": { "type": "string" },
+          "email": { "type": "string", "format": "email" },
+          "phone": { "type": "string" },
+          "password": { "type": "string", "minLength": 8, "format": "password" },
+          "home_location_id": { "$ref": "#/components/schemas/ObjectId", "description": "Required when `role` is `employee`." }
+        }
+      },
+      "UserStatusRequest": {
+        "type": "object", "required": ["status"],
+        "properties": { "status": { "$ref": "#/components/schemas/UserStatus" }}
+      },
+      "WashServiceRequest": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "duration_min": { "type": "integer", "minimum": 1, "maximum": 480 },
+          "price_mnt": { "$ref": "#/components/schemas/MNT" },
+          "bonus_mnt": { "$ref": "#/components/schemas/MNT", "description": "May not exceed `price_mnt`." },
+          "active": { "type": "boolean" }
+        }
+      },
+      "LocationRequest": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "address": { "type": "string" },
+          "lat": { "type": "number", "format": "double" },
+          "lng": { "type": "number", "format": "double" },
+          "geofence_radius_m": { "type": "number", "minimum": 25, "maximum": 1000 },
+          "active": { "type": "boolean" }
+        }
+      },
+      "ShiftRequest": {
+        "type": "object", "required": ["employee_id", "location_id", "start_at", "end_at"],
+        "properties": {
+          "employee_id": { "$ref": "#/components/schemas/ObjectId" },
+          "location_id": { "$ref": "#/components/schemas/ObjectId" },
+          "start_at": { "type": "string", "format": "date-time", "description": "RFC 3339, absolute instant." },
+          "end_at": { "type": "string", "format": "date-time", "description": "At most 16 hours after `start_at`." }
+        }
+      }
+    }
+  }
+}

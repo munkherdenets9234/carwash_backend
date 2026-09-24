@@ -107,7 +107,15 @@ func TestFeaturesNamesEveryOptionalCapability(t *testing.T) {
 	}
 }
 
-func TestManagerBootstrapNeedsBothHalves(t *testing.T) {
+// The startup manager bootstrap now needs THREE things, not two.
+//
+// Credentials alone are no longer enough to describe it: since adoption into
+// the platform there is no single business to create a manager for, so the
+// tenant has to be named. Credentials without a tenant would previously have
+// created a manager belonging to nobody — a row with a zero tenant that every
+// scoped query then refuses to return, which looks exactly like the bootstrap
+// silently not running.
+func TestManagerBootstrapNeedsAllThreeParts(t *testing.T) {
 	c := valid()
 	if c.ManagerBootstrapEnabled() {
 		t.Error("blank credentials must not enable the bootstrap")
@@ -117,8 +125,31 @@ func TestManagerBootstrapNeedsBothHalves(t *testing.T) {
 		t.Error("an email without a password must not enable the bootstrap")
 	}
 	c.ManagerPassword = "manager123"
+	if c.ManagerBootstrapEnabled() {
+		t.Error("credentials without a tenant must not enable the bootstrap — the manager would belong to nobody")
+	}
+	c.BootstrapTenantID = "68c9e1f2a3b4c5d6e7f80912"
 	if !c.ManagerBootstrapEnabled() {
-		t.Error("both halves set must enable the bootstrap")
+		t.Error("credentials plus a tenant must enable the bootstrap")
+	}
+}
+
+// The platform link needs both halves: a URL with no service key cannot
+// authenticate, and a key with no URL has nowhere to go. Either alone is a
+// half-configured deployment, and treating it as configured would mean every
+// request failing at the call instead of once at startup.
+func TestPlatformLinkNeedsBothHalves(t *testing.T) {
+	c := valid()
+	if c.PlatformLinkEnabled() {
+		t.Error("a blank platform link must not report as enabled")
+	}
+	c.TenantcoreURL = "http://tenantcore:8090"
+	if c.PlatformLinkEnabled() {
+		t.Error("a URL without a service key must not report as enabled")
+	}
+	c.TenantcoreServiceKey = "sk_live_service"
+	if !c.PlatformLinkEnabled() {
+		t.Error("both halves set must report as enabled")
 	}
 }
 

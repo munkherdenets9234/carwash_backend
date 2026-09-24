@@ -52,12 +52,12 @@ func (h *jobsController) List(c *gin.Context) error {
 		q.Status = &status
 	}
 
-	rows, err := h.reservations.List(c.Request.Context(), q)
+	rows, err := h.reservations.List(c.Request.Context(), apictx.TenantID(c), q)
 	if err != nil {
 		return err
 	}
 
-	resolved, err := h.resolver.ForReservations(c.Request.Context(), rows)
+	resolved, err := h.resolver.ForReservations(c.Request.Context(), apictx.TenantID(c), rows)
 	if err != nil {
 		return err
 	}
@@ -85,7 +85,7 @@ func (h *jobsController) Assign(c *gin.Context) error {
 	if err := apictx.Bind(c, &req); err != nil {
 		return err
 	}
-	if err := h.reservations.Reassign(c.Request.Context(), id, req.EmployeeID); err != nil {
+	if err := h.reservations.Reassign(c.Request.Context(), apictx.TenantID(c), id, req.EmployeeID); err != nil {
 		return err
 	}
 	return h.respond(c, id)
@@ -106,18 +106,18 @@ func (h *jobsController) SetStatus(c *gin.Context) error {
 	if err := apictx.Bind(c, &req); err != nil {
 		return err
 	}
-	if err := h.reservations.SetStatus(c.Request.Context(), id, req.Status, nil); err != nil {
+	if err := h.reservations.SetStatus(c.Request.Context(), apictx.TenantID(c), id, req.Status, nil); err != nil {
 		return err
 	}
 	return h.respond(c, id)
 }
 
 func (h *jobsController) respond(c *gin.Context, id primitive.ObjectID) error {
-	res, err := h.reservations.Get(c.Request.Context(), id)
+	res, err := h.reservations.Get(c.Request.Context(), apictx.TenantID(c), id)
 	if err != nil {
 		return err
 	}
-	resolved, err := h.resolver.ForReservations(c.Request.Context(), []*models.Reservation{res})
+	resolved, err := h.resolver.ForReservations(c.Request.Context(), apictx.TenantID(c), []*models.Reservation{res})
 	if err != nil {
 		return err
 	}

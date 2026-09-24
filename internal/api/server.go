@@ -22,6 +22,7 @@ type Deps struct {
 	Log    *zap.Logger
 
 	Auth        *middleware.Auth
+	Tenant      *middleware.Tenant
 	RateLimiter *middleware.RateLimiter
 
 	AuthSvc      *service.AuthService
@@ -33,6 +34,7 @@ type Deps struct {
 	Attendance   *service.AttendanceService
 	Reports      *service.ReportService
 	Resolver     *service.Resolver
+	Media        *service.MediaService
 }
 
 // Server is the built HTTP engine.

@@ -41,7 +41,7 @@ func NewResolver(
 }
 
 // ForReservations resolves everything a booking list refers to.
-func (r *Resolver) ForReservations(ctx context.Context, rows []*models.Reservation) (Resolved, error) {
+func (r *Resolver) ForReservations(ctx context.Context, tenantID primitive.ObjectID, rows []*models.Reservation) (Resolved, error) {
 	var users, cars, services, locations idSet
 	for _, row := range rows {
 		users.add(row.EmployeeID)
@@ -50,43 +50,43 @@ func (r *Resolver) ForReservations(ctx context.Context, rows []*models.Reservati
 		services.add(row.ServiceID)
 		locations.add(row.LocationID)
 	}
-	return r.load(ctx, users, cars, services, locations)
+	return r.load(ctx, tenantID, users, cars, services, locations)
 }
 
 // ForShifts resolves the employees and locations on a roster.
-func (r *Resolver) ForShifts(ctx context.Context, rows []*models.Shift) (Resolved, error) {
+func (r *Resolver) ForShifts(ctx context.Context, tenantID primitive.ObjectID, rows []*models.Shift) (Resolved, error) {
 	var users, locations idSet
 	for _, row := range rows {
 		users.add(row.EmployeeID)
 		locations.add(row.LocationID)
 	}
-	return r.load(ctx, users, idSet{}, idSet{}, locations)
+	return r.load(ctx, tenantID, users, idSet{}, idSet{}, locations)
 }
 
 // ForTimeEntries resolves the employees and locations on a timesheet.
-func (r *Resolver) ForTimeEntries(ctx context.Context, rows []*models.TimeEntry) (Resolved, error) {
+func (r *Resolver) ForTimeEntries(ctx context.Context, tenantID primitive.ObjectID, rows []*models.TimeEntry) (Resolved, error) {
 	var users, locations idSet
 	for _, row := range rows {
 		users.add(row.EmployeeID)
 		locations.add(row.LocationID)
 	}
-	return r.load(ctx, users, idSet{}, idSet{}, locations)
+	return r.load(ctx, tenantID, users, idSet{}, idSet{}, locations)
 }
 
-func (r *Resolver) load(ctx context.Context, users, cars, services, locations idSet) (Resolved, error) {
+func (r *Resolver) load(ctx context.Context, tenantID primitive.ObjectID, users, cars, services, locations idSet) (Resolved, error) {
 	out := Resolved{}
 	var err error
 
-	if out.Users, err = r.users.FindManyByIDs(ctx, users.list()); err != nil {
+	if out.Users, err = r.users.FindManyByIDs(ctx, tenantID, users.list()); err != nil {
 		return out, apierr.Internal(err)
 	}
-	if out.Cars, err = r.cars.FindManyByIDs(ctx, cars.list()); err != nil {
+	if out.Cars, err = r.cars.FindManyByIDs(ctx, tenantID, cars.list()); err != nil {
 		return out, apierr.Internal(err)
 	}
-	if out.Services, err = r.services.FindManyByIDs(ctx, services.list()); err != nil {
+	if out.Services, err = r.services.FindManyByIDs(ctx, tenantID, services.list()); err != nil {
 		return out, apierr.Internal(err)
 	}
-	if out.Locations, err = r.locations.FindManyByIDs(ctx, locations.list()); err != nil {
+	if out.Locations, err = r.locations.FindManyByIDs(ctx, tenantID, locations.list()); err != nil {
 		return out, apierr.Internal(err)
 	}
 	return out, nil

@@ -22,6 +22,7 @@ type repos struct {
 	shifts    *repository.ShiftRepo
 	bookings  *repository.ReservationRepo
 	entries   *repository.TimeEntryRepo
+	media     *repository.MediaRepo
 }
 
 func newRepos(db *mongo.Database) repos {
@@ -33,6 +34,7 @@ func newRepos(db *mongo.Database) repos {
 		shifts:    repository.NewShiftRepo(db),
 		bookings:  repository.NewReservationRepo(db),
 		entries:   repository.NewTimeEntryRepo(db),
+		media:     repository.NewMediaRepo(db),
 	}
 }
 
@@ -46,6 +48,7 @@ type services struct {
 	attendance   *service.AttendanceService
 	reports      *service.ReportService
 	resolver     *service.Resolver
+	media        *service.MediaService
 }
 
 func newServices(r repos, maker *token.Maker, cfg *config.Config, log *zap.Logger) services {
@@ -63,5 +66,31 @@ func newServices(r repos, maker *token.Maker, cfg *config.Config, log *zap.Logge
 		attendance: service.NewAttendanceService(r.entries, r.locations, r.users),
 		reports:    service.NewReportService(r.bookings, r.entries, r.users, cfg.Location),
 		resolver:   service.NewResolver(r.users, r.cars, r.services, r.locations),
+		media:      buildMedia(r, cfg, log),
 	}
+}
+
+// buildMedia constructs the photograph service.
+//
+// A misconfigured image host is logged and returns a service with no host
+// rather than stopping the process. Bookings, the roster and attendance have
+// nothing to do with photographs, and refusing to serve any of them because a
+// CLOUDINARY_URL has a typo in it would be a far worse outage than the one it
+// prevents. The gallery routes then answer FEATURE_UNAVAILABLE and say why,
+// and /readyz reports the feature as off.
+func buildMedia(r repos, cfg *config.Config, log *zap.Logger) *service.MediaService {
+	svc, err := service.NewMediaService(r.media, cfg.CloudinaryURL, cfg.UploadMaxBytes)
+	if err != nil {
+		log.Error("image uploads unavailable — CLOUDINARY_URL is set but could not be parsed; "+
+			"the gallery cannot be edited and POST /manager/media will answer 503",
+			zap.Error(err))
+		// Deliberately not nil: a service with no host still answers List,
+		// so a gallery uploaded before the typo keeps rendering.
+		noHost, _ := service.NewMediaService(r.media, "", cfg.UploadMaxBytes)
+		return noHost
+	}
+	if cfg.UploadsEnabled() {
+		log.Info("image uploads ready", zap.Int64("max_bytes", cfg.UploadMaxBytes))
+	}
+	return svc
 }

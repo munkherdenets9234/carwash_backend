@@ -58,14 +58,14 @@ type BookInput struct {
 	Notes      string
 }
 
-// slotKey is the value behind the unique index that stops two customers
-// taking the same start time with the same employee. Second-precision UTC so
-// the same instant always produces the same string.
-func slotKey(employeeID primitive.ObjectID, start time.Time) string {
-	return employeeID.Hex() + "|" + start.UTC().Format(time.RFC3339)
-}
+// The key behind the unique index that stops two customers taking the same
+// start time with the same employee now lives in models.SlotKey, alongside
+// the time-entry key it is a twin of. It moved because the writer was here
+// and the index was in the repository package, and a unique index whose key
+// is built in one package and constrained in another is one refactor away
+// from silently constraining nothing.
 
-func (s *ReservationService) Book(ctx context.Context, customerID primitive.ObjectID, in BookInput) (*models.Reservation, error) {
+func (s *ReservationService) Book(ctx context.Context, tenantID primitive.ObjectID, customerID primitive.ObjectID, in BookInput) (*models.Reservation, error) {
 	empID, err := primitive.ObjectIDFromHex(in.EmployeeID)
 	if err != nil {
 		return nil, apierr.BadRequest("employee_id is not a valid id")
@@ -95,14 +95,14 @@ func (s *ReservationService) Book(ctx context.Context, customerID primitive.Obje
 	// The car is looked up scoped to the caller, so booking a wash for
 	// someone else's vehicle is a 404 rather than an authorisation check
 	// somebody could forget to write.
-	if _, err := s.cars.FindByIDForOwner(ctx, carID, customerID); err != nil {
+	if _, err := s.cars.FindByIDForOwner(ctx, tenantID, carID, customerID); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("car")
 		}
 		return nil, apierr.Internal(err)
 	}
 
-	ws, err := s.services.FindByID(ctx, svcID)
+	ws, err := s.services.FindByID(ctx, tenantID, svcID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("service").In(apierr.DomainCatalog)
@@ -113,7 +113,7 @@ func (s *ReservationService) Book(ctx context.Context, customerID primitive.Obje
 		return nil, apierr.ValidationFailed("that service is not currently offered")
 	}
 
-	loc, err := s.locations.FindByID(ctx, locID)
+	loc, err := s.locations.FindByID(ctx, tenantID, locID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("location").In(apierr.DomainCatalog)
@@ -124,7 +124,7 @@ func (s *ReservationService) Book(ctx context.Context, customerID primitive.Obje
 		return nil, apierr.ValidationFailed("that location is closed")
 	}
 
-	emp, err := s.users.FindByIDAndRole(ctx, empID, models.RoleEmployee)
+	emp, err := s.users.FindByIDAndRole(ctx, tenantID, empID, models.RoleEmployee)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("employee")
@@ -136,23 +136,34 @@ func (s *ReservationService) Book(ctx context.Context, customerID primitive.Obje
 	}
 
 	end := start.Add(time.Duration(ws.DurationMin) * time.Minute)
-	if err := s.assertFree(ctx, empID, locID, Interval{Start: start, End: end}, nil); err != nil {
+	if err := s.assertFree(ctx, tenantID, empID, locID, Interval{Start: start, End: end}, nil); err != nil {
 		return nil, err
 	}
 
+	// Every booking carries a reference, not only guest ones. A second,
+	// guest-only lookup path would be the one that is never exercised by a
+	// signed-in customer and so never noticed when it breaks.
+	reference, err := models.NewReference()
+	if err != nil {
+		return nil, apierr.Internal(err)
+	}
+
 	res := &models.Reservation{
-		CustomerID: customerID,
-		EmployeeID: empID,
-		CarID:      carID,
-		ServiceID:  svcID,
-		LocationID: locID,
-		StartAt:    start,
-		EndAt:      end,
-		Status:     models.ReservationBooked,
+		TenantID:     tenantID,
+		CustomerID:   customerID,
+		Reference:    reference,
+		ReferenceKey: models.ReferenceKey(tenantID, reference),
+		EmployeeID:   empID,
+		CarID:        carID,
+		ServiceID:    svcID,
+		LocationID:   locID,
+		StartAt:      start,
+		EndAt:        end,
+		Status:       models.ReservationBooked,
 		// Copied, not referenced — see models.Reservation.
 		PriceMNT: ws.PriceMNT,
 		BonusMNT: ws.BonusMNT,
-		SlotKey:  slotKey(empID, start),
+		SlotKey:  models.SlotKey(tenantID, empID, start),
 		Notes:    strings.TrimSpace(in.Notes),
 	}
 
@@ -169,8 +180,8 @@ func (s *ReservationService) Book(ctx context.Context, customerID primitive.Obje
 // assertFree checks the roster and the existing bookings. exclude is the id
 // of a reservation to ignore, used when moving an existing booking so it does
 // not collide with itself.
-func (s *ReservationService) assertFree(ctx context.Context, empID, locID primitive.ObjectID, job Interval, exclude *primitive.ObjectID) error {
-	rostered, err := s.shifts.List(ctx, repository.ShiftQuery{
+func (s *ReservationService) assertFree(ctx context.Context, tenantID primitive.ObjectID, empID, locID primitive.ObjectID, job Interval, exclude *primitive.ObjectID) error {
+	rostered, err := s.shifts.List(ctx, tenantID, repository.ShiftQuery{
 		EmployeeID: &empID,
 		LocationID: &locID,
 		From:       job.Start,
@@ -184,7 +195,7 @@ func (s *ReservationService) assertFree(ctx context.Context, empID, locID primit
 		windows = append(windows, Interval{Start: sh.StartAt, End: sh.EndAt})
 	}
 
-	taken, err := s.bookings.ListBlockingForEmployees(ctx, []primitive.ObjectID{empID}, job.Start, job.End)
+	taken, err := s.bookings.ListBlockingForEmployees(ctx, tenantID, []primitive.ObjectID{empID}, job.Start, job.End)
 	if err != nil {
 		return apierr.Internal(err)
 	}
@@ -204,16 +215,16 @@ func (s *ReservationService) assertFree(ctx context.Context, empID, locID primit
 
 // ── Reads ─────────────────────────────────────────────────────────────────
 
-func (s *ReservationService) List(ctx context.Context, q repository.ReservationQuery) ([]*models.Reservation, error) {
-	out, err := s.bookings.List(ctx, q)
+func (s *ReservationService) List(ctx context.Context, tenantID primitive.ObjectID, q repository.ReservationQuery) ([]*models.Reservation, error) {
+	out, err := s.bookings.List(ctx, tenantID, q)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
 	return out, nil
 }
 
-func (s *ReservationService) GetForCustomer(ctx context.Context, id, customerID primitive.ObjectID) (*models.Reservation, error) {
-	res, err := s.bookings.FindByIDForCustomer(ctx, id, customerID)
+func (s *ReservationService) GetForCustomer(ctx context.Context, tenantID primitive.ObjectID, id, customerID primitive.ObjectID) (*models.Reservation, error) {
+	res, err := s.bookings.FindByIDForCustomer(ctx, tenantID, id, customerID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("reservation").In(apierr.DomainReservation)
@@ -223,8 +234,8 @@ func (s *ReservationService) GetForCustomer(ctx context.Context, id, customerID 
 	return res, nil
 }
 
-func (s *ReservationService) Get(ctx context.Context, id primitive.ObjectID) (*models.Reservation, error) {
-	res, err := s.bookings.FindByID(ctx, id)
+func (s *ReservationService) Get(ctx context.Context, tenantID primitive.ObjectID, id primitive.ObjectID) (*models.Reservation, error) {
+	res, err := s.bookings.FindByID(ctx, tenantID, id)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("reservation").In(apierr.DomainReservation)
@@ -237,15 +248,15 @@ func (s *ReservationService) Get(ctx context.Context, id primitive.ObjectID) (*m
 // ── Lifecycle ─────────────────────────────────────────────────────────────
 
 // CancelByCustomer withdraws a booking the caller owns.
-func (s *ReservationService) CancelByCustomer(ctx context.Context, id, customerID primitive.ObjectID) error {
-	res, err := s.GetForCustomer(ctx, id, customerID)
+func (s *ReservationService) CancelByCustomer(ctx context.Context, tenantID primitive.ObjectID, id, customerID primitive.ObjectID) error {
+	res, err := s.GetForCustomer(ctx, tenantID, id, customerID)
 	if err != nil {
 		return err
 	}
 	if !res.Open() {
 		return apierr.Conflict("that booking can no longer be cancelled").In(apierr.DomainReservation)
 	}
-	return s.release(ctx, res.ID, models.ReservationCancelled)
+	return s.release(ctx, tenantID, res.ID, models.ReservationCancelled)
 }
 
 // SetStatus moves a booking on. actorID is the employee acting, or nil for a
@@ -254,8 +265,8 @@ func (s *ReservationService) CancelByCustomer(ctx context.Context, id, customerI
 // An employee may only touch their own work. Without that check any employee
 // could mark any other employee's wash complete, which credits the bonus to
 // the wrong person and is invisible until payroll.
-func (s *ReservationService) SetStatus(ctx context.Context, id primitive.ObjectID, status models.ReservationStatus, actorEmployeeID *primitive.ObjectID) error {
-	res, err := s.Get(ctx, id)
+func (s *ReservationService) SetStatus(ctx context.Context, tenantID primitive.ObjectID, id primitive.ObjectID, status models.ReservationStatus, actorEmployeeID *primitive.ObjectID) error {
+	res, err := s.Get(ctx, tenantID, id)
 	if err != nil {
 		return err
 	}
@@ -271,16 +282,16 @@ func (s *ReservationService) SetStatus(ctx context.Context, id primitive.ObjectI
 	now := s.now()
 	switch status {
 	case models.ReservationInProgress:
-		return s.update(ctx, id, bson.M{"status": status})
+		return s.update(ctx, tenantID, id, bson.M{"status": status})
 
 	case models.ReservationCompleted:
 		// completed_at is what the daily report groups on, so it is written
 		// here and never back-dated: the report is a record of when work
 		// finished, not of when someone got round to pressing the button.
-		return s.update(ctx, id, bson.M{"status": status, "completed_at": now})
+		return s.update(ctx, tenantID, id, bson.M{"status": status, "completed_at": now})
 
 	case models.ReservationCancelled, models.ReservationNoShow:
-		return s.release(ctx, id, status)
+		return s.release(ctx, tenantID, id, status)
 
 	default:
 		return apierr.ValidationFailed("unknown status")
@@ -289,8 +300,8 @@ func (s *ReservationService) SetStatus(ctx context.Context, id primitive.ObjectI
 
 // Reassign moves an open job to a different employee — the manager's tool for
 // covering an absence, and the point at which the bonus changes hands.
-func (s *ReservationService) Reassign(ctx context.Context, id primitive.ObjectID, newEmployeeID string) error {
-	res, err := s.Get(ctx, id)
+func (s *ReservationService) Reassign(ctx context.Context, tenantID primitive.ObjectID, id primitive.ObjectID, newEmployeeID string) error {
+	res, err := s.Get(ctx, tenantID, id)
 	if err != nil {
 		return err
 	}
@@ -309,7 +320,7 @@ func (s *ReservationService) Reassign(ctx context.Context, id primitive.ObjectID
 		return apierr.ValidationFailed("that booking is already assigned to this employee")
 	}
 
-	emp, err := s.users.FindByIDAndRole(ctx, empID, models.RoleEmployee)
+	emp, err := s.users.FindByIDAndRole(ctx, tenantID, empID, models.RoleEmployee)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return apierr.NotFound("employee")
@@ -321,21 +332,21 @@ func (s *ReservationService) Reassign(ctx context.Context, id primitive.ObjectID
 	}
 
 	job := Interval{Start: res.StartAt, End: res.EndAt}
-	if err := s.assertFree(ctx, empID, res.LocationID, job, &res.ID); err != nil {
+	if err := s.assertFree(ctx, tenantID, empID, res.LocationID, job, &res.ID); err != nil {
 		return err
 	}
 
-	if err := s.update(ctx, id, bson.M{
+	if err := s.update(ctx, tenantID, id, bson.M{
 		"employee_id": empID,
-		"slot_key":    slotKey(empID, res.StartAt),
+		"slot_key":    models.SlotKey(tenantID, empID, res.StartAt),
 	}); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *ReservationService) update(ctx context.Context, id primitive.ObjectID, set bson.M) error {
-	if err := s.bookings.UpdateFields(ctx, id, set); err != nil {
+func (s *ReservationService) update(ctx context.Context, tenantID primitive.ObjectID, id primitive.ObjectID, set bson.M) error {
+	if err := s.bookings.UpdateFields(ctx, tenantID, id, set); err != nil {
 		switch {
 		case errors.Is(err, repository.ErrNotFound):
 			return apierr.NotFound("reservation").In(apierr.DomainReservation)
@@ -348,12 +359,12 @@ func (s *ReservationService) update(ctx context.Context, id primitive.ObjectID, 
 	return nil
 }
 
-func (s *ReservationService) release(ctx context.Context, id primitive.ObjectID, status models.ReservationStatus) error {
+func (s *ReservationService) release(ctx context.Context, tenantID primitive.ObjectID, id primitive.ObjectID, status models.ReservationStatus) error {
 	set := bson.M{"status": status}
 	if status == models.ReservationCancelled {
 		set["cancelled_at"] = s.now()
 	}
-	if err := s.bookings.UpdateAndReleaseSlot(ctx, id, set); err != nil {
+	if err := s.bookings.UpdateAndReleaseSlot(ctx, tenantID, id, set); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return apierr.NotFound("reservation").In(apierr.DomainReservation)
 		}

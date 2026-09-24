@@ -36,7 +36,7 @@ type NewStaffInput struct {
 	HomeLocationID string // employees only
 }
 
-func (s *StaffService) Create(ctx context.Context, in NewStaffInput) (*models.User, error) {
+func (s *StaffService) Create(ctx context.Context, tenantID primitive.ObjectID, in NewStaffInput) (*models.User, error) {
 	if in.Role != models.RoleManager && in.Role != models.RoleEmployee {
 		// Customers sign themselves up. Allowing a manager to mint one here
 		// would create an account whose owner never agreed to a password
@@ -55,11 +55,12 @@ func (s *StaffService) Create(ctx context.Context, in NewStaffInput) (*models.Us
 	}
 
 	u := &models.User{
-		Role:   in.Role,
-		Name:   name,
-		Email:  in.Email,
-		Phone:  strings.TrimSpace(in.Phone),
-		Status: models.UserActive,
+		TenantID: tenantID,
+		Role:     in.Role,
+		Name:     name,
+		Email:    in.Email,
+		Phone:    strings.TrimSpace(in.Phone),
+		Status:   models.UserActive,
 	}
 
 	if in.Role == models.RoleEmployee {
@@ -73,7 +74,7 @@ func (s *StaffService) Create(ctx context.Context, in NewStaffInput) (*models.Us
 		// Checked against the collection rather than trusted: an employee
 		// rostered to a location that does not exist would pass every later
 		// check and then fail at clock-in, far from the cause.
-		if _, err := s.locations.FindByID(ctx, locID); err != nil {
+		if _, err := s.locations.FindByID(ctx, tenantID, locID); err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
 				return nil, apierr.NotFound("location").In(apierr.DomainCatalog)
 			}
@@ -98,8 +99,8 @@ func (s *StaffService) Create(ctx context.Context, in NewStaffInput) (*models.Us
 }
 
 // ListEmployees returns every employee, active or not.
-func (s *StaffService) ListEmployees(ctx context.Context) ([]*models.User, error) {
-	out, err := s.users.ListByRole(ctx, models.RoleEmployee)
+func (s *StaffService) ListEmployees(ctx context.Context, tenantID primitive.ObjectID) ([]*models.User, error) {
+	out, err := s.users.ListByRole(ctx, tenantID, models.RoleEmployee)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
@@ -107,8 +108,8 @@ func (s *StaffService) ListEmployees(ctx context.Context) ([]*models.User, error
 }
 
 // ListManagers returns every manager.
-func (s *StaffService) ListManagers(ctx context.Context) ([]*models.User, error) {
-	out, err := s.users.ListByRole(ctx, models.RoleManager)
+func (s *StaffService) ListManagers(ctx context.Context, tenantID primitive.ObjectID) ([]*models.User, error) {
+	out, err := s.users.ListByRole(ctx, tenantID, models.RoleManager)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
@@ -117,8 +118,8 @@ func (s *StaffService) ListManagers(ctx context.Context) ([]*models.User, error)
 
 // ListCustomers returns every customer. Manager-only: it is the one read in
 // this service that returns other people's contact details.
-func (s *StaffService) ListCustomers(ctx context.Context) ([]*models.User, error) {
-	out, err := s.users.ListByRole(ctx, models.RoleCustomer)
+func (s *StaffService) ListCustomers(ctx context.Context, tenantID primitive.ObjectID) ([]*models.User, error) {
+	out, err := s.users.ListByRole(ctx, tenantID, models.RoleCustomer)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
@@ -126,7 +127,7 @@ func (s *StaffService) ListCustomers(ctx context.Context) ([]*models.User, error
 }
 
 // SetStatus suspends or reactivates an account.
-func (s *StaffService) SetStatus(ctx context.Context, actorID, targetID string, status models.UserStatus) error {
+func (s *StaffService) SetStatus(ctx context.Context, tenantID primitive.ObjectID, actorID, targetID string, status models.UserStatus) error {
 	if status != models.UserActive && status != models.UserSuspended {
 		return apierr.ValidationFailed("status must be active or suspended")
 	}
@@ -139,7 +140,7 @@ func (s *StaffService) SetStatus(ctx context.Context, actorID, targetID string, 
 	if actorID == targetID && status == models.UserSuspended {
 		return apierr.ValidationFailed("you cannot suspend your own account")
 	}
-	if err := s.users.UpdateStatus(ctx, id, status); err != nil {
+	if err := s.users.UpdateStatus(ctx, tenantID, id, status); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return apierr.NotFound("user")
 		}
@@ -150,8 +151,8 @@ func (s *StaffService) SetStatus(ctx context.Context, actorID, targetID string, 
 
 // EnsureBootstrapManager creates the first manager when the collection has
 // none. Called at startup, and a no-op on every restart after the first.
-func (s *StaffService) EnsureBootstrapManager(ctx context.Context, name, email, plain string) error {
-	n, err := s.users.CountByRole(ctx, models.RoleManager)
+func (s *StaffService) EnsureBootstrapManager(ctx context.Context, tenantID primitive.ObjectID, name, email, plain string) error {
+	n, err := s.users.CountByRole(ctx, tenantID, models.RoleManager)
 	if err != nil {
 		return err
 	}
@@ -166,6 +167,7 @@ func (s *StaffService) EnsureBootstrapManager(ctx context.Context, name, email, 
 		return err
 	}
 	u := &models.User{
+		TenantID:     tenantID,
 		Role:         models.RoleManager,
 		Name:         name,
 		Email:        email,

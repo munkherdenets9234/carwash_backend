@@ -35,12 +35,12 @@ func (r *LocationRepo) Create(ctx context.Context, l *models.Location) error {
 // List returns locations, optionally only the active ones. Customers see
 // active only; a manager sees all, because a site that was switched off is
 // exactly what they need to find in order to switch it back on.
-func (r *LocationRepo) List(ctx context.Context, activeOnly bool) ([]*models.Location, error) {
+func (r *LocationRepo) List(ctx context.Context, tenantID primitive.ObjectID, activeOnly bool) ([]*models.Location, error) {
 	filter := bson.M{}
 	if activeOnly {
 		filter["active"] = true
 	}
-	cur, err := r.col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "name", Value: 1}}))
+	cur, err := r.col.Find(ctx, scoped(tenantID, filter), options.Find().SetSort(bson.D{{Key: "name", Value: 1}}))
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -53,17 +53,17 @@ func (r *LocationRepo) List(ctx context.Context, activeOnly bool) ([]*models.Loc
 	return out, nil
 }
 
-func (r *LocationRepo) FindByID(ctx context.Context, id primitive.ObjectID) (*models.Location, error) {
+func (r *LocationRepo) FindByID(ctx context.Context, tenantID, id primitive.ObjectID) (*models.Location, error) {
 	var l models.Location
-	if err := r.col.FindOne(ctx, bson.M{"_id": id}).Decode(&l); err != nil {
+	if err := r.col.FindOne(ctx, scopedID(tenantID, id)).Decode(&l); err != nil {
 		return nil, translate(err)
 	}
 	return &l, nil
 }
 
-func (r *LocationRepo) Update(ctx context.Context, id primitive.ObjectID, set bson.M) error {
+func (r *LocationRepo) Update(ctx context.Context, tenantID, id primitive.ObjectID, set bson.M) error {
 	set["updated_at"] = time.Now().UTC()
-	res, err := r.col.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": set})
+	res, err := r.col.UpdateOne(ctx, scopedID(tenantID, id), bson.M{"$set": set})
 	if err != nil {
 		return translate(err)
 	}
@@ -75,12 +75,12 @@ func (r *LocationRepo) Update(ctx context.Context, id primitive.ObjectID, set bs
 
 // FindManyByIDs returns the named locations keyed by id, so a list response
 // can label every row from one query instead of one per row.
-func (r *LocationRepo) FindManyByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]*models.Location, error) {
+func (r *LocationRepo) FindManyByIDs(ctx context.Context, tenantID primitive.ObjectID, ids []primitive.ObjectID) (map[primitive.ObjectID]*models.Location, error) {
 	out := make(map[primitive.ObjectID]*models.Location, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
-	cur, err := r.col.Find(ctx, bson.M{"_id": bson.M{"$in": ids}})
+	cur, err := r.col.Find(ctx, scoped(tenantID, bson.M{"_id": bson.M{"$in": ids}}))
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -113,12 +113,12 @@ func (r *WashServiceRepo) Create(ctx context.Context, s *models.WashService) err
 	return translate(err)
 }
 
-func (r *WashServiceRepo) List(ctx context.Context, activeOnly bool) ([]*models.WashService, error) {
+func (r *WashServiceRepo) List(ctx context.Context, tenantID primitive.ObjectID, activeOnly bool) ([]*models.WashService, error) {
 	filter := bson.M{}
 	if activeOnly {
 		filter["active"] = true
 	}
-	cur, err := r.col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "price_mnt", Value: 1}}))
+	cur, err := r.col.Find(ctx, scoped(tenantID, filter), options.Find().SetSort(bson.D{{Key: "price_mnt", Value: 1}}))
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -131,21 +131,21 @@ func (r *WashServiceRepo) List(ctx context.Context, activeOnly bool) ([]*models.
 	return out, nil
 }
 
-func (r *WashServiceRepo) FindByID(ctx context.Context, id primitive.ObjectID) (*models.WashService, error) {
+func (r *WashServiceRepo) FindByID(ctx context.Context, tenantID, id primitive.ObjectID) (*models.WashService, error) {
 	var s models.WashService
-	if err := r.col.FindOne(ctx, bson.M{"_id": id}).Decode(&s); err != nil {
+	if err := r.col.FindOne(ctx, scopedID(tenantID, id)).Decode(&s); err != nil {
 		return nil, translate(err)
 	}
 	return &s, nil
 }
 
 // FindManyByIDs returns the named services keyed by id.
-func (r *WashServiceRepo) FindManyByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]*models.WashService, error) {
+func (r *WashServiceRepo) FindManyByIDs(ctx context.Context, tenantID primitive.ObjectID, ids []primitive.ObjectID) (map[primitive.ObjectID]*models.WashService, error) {
 	out := make(map[primitive.ObjectID]*models.WashService, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
-	cur, err := r.col.Find(ctx, bson.M{"_id": bson.M{"$in": ids}})
+	cur, err := r.col.Find(ctx, scoped(tenantID, bson.M{"_id": bson.M{"$in": ids}}))
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -161,9 +161,9 @@ func (r *WashServiceRepo) FindManyByIDs(ctx context.Context, ids []primitive.Obj
 	return out, nil
 }
 
-func (r *WashServiceRepo) Update(ctx context.Context, id primitive.ObjectID, set bson.M) error {
+func (r *WashServiceRepo) Update(ctx context.Context, tenantID, id primitive.ObjectID, set bson.M) error {
 	set["updated_at"] = time.Now().UTC()
-	res, err := r.col.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": set})
+	res, err := r.col.UpdateOne(ctx, scopedID(tenantID, id), bson.M{"$set": set})
 	if err != nil {
 		return translate(err)
 	}

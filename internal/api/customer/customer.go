@@ -30,9 +30,7 @@ type Deps struct {
 	Loc *time.Location
 
 	Cars         *service.CarService
-	Schedule     *service.ScheduleService
 	Reservations *service.ReservationService
-	Staff        *service.StaffService
 	Resolver     *service.Resolver
 }
 
@@ -41,8 +39,6 @@ func Register(base *gin.RouterGroup, d Deps) {
 	cars := &carsController{svc: d.Cars}
 	bookings := &reservationsController{
 		reservations: d.Reservations,
-		schedule:     d.Schedule,
-		staff:        d.Staff,
 		resolver:     d.Resolver,
 		loc:          d.Loc,
 	}
@@ -62,10 +58,11 @@ func Register(base *gin.RouterGroup, d Deps) {
 	limited.POST("/cars", cars.Create)
 	limited.POST("/reservations", bookings.Create)
 
-	// Choosing who washes your car needs a list of who there is, and when
-	// each of them is free.
-	g.GET("/employees", bookings.ListEmployees)
-	g.GET("/availability", bookings.Availability)
+	// /employees and /availability used to be here. They moved to the public
+	// surface when booking stopped requiring an account: a visitor with no
+	// token has to be able to see who is free, and the answer is identical
+	// for a signed-in customer. Two copies of it would have meant one of
+	// them was never the one being tested.
 
 	r := g.Group("/reservations")
 	r.GET("", bookings.List)

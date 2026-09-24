@@ -14,7 +14,15 @@ import (
 // cancellation and roster edit, and the first missed invalidation is a
 // double-booking.
 type Shift struct {
-	ID         primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	ID primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	// TenantID is the business this row belongs to. Every query filters on
+	// it, in the filter itself rather than as a check after the read, so a
+	// forgotten scope is an empty result rather than another business data.
+	//
+	// json:"-" because it is never on the wire: a client already proved
+	// which tenant it is by presenting the API key, and echoing the id back
+	// tells it nothing it can use.
+	TenantID   primitive.ObjectID `bson:"tenant_id" json:"-"`
 	EmployeeID primitive.ObjectID `bson:"employee_id" json:"employee_id"`
 	LocationID primitive.ObjectID `bson:"location_id" json:"location_id"`
 

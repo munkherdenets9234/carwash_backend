@@ -52,12 +52,30 @@ type EmployeeProfile struct {
 // collection because they share an authentication flow; what differs is the
 // role, which decides the route groups their token may enter.
 type User struct {
-	ID   primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	Role Role               `bson:"role" json:"role"`
+	ID primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	// TenantID is the business this row belongs to. Every query filters on
+	// it, in the filter itself rather than as a check after the read, so a
+	// forgotten scope is an empty result rather than another business data.
+	//
+	// json:"-" because it is never on the wire: a client already proved
+	// which tenant it is by presenting the API key, and echoing the id back
+	// tells it nothing it can use.
+	TenantID primitive.ObjectID `bson:"tenant_id" json:"-"`
+	Role     Role               `bson:"role" json:"role"`
 
 	Name  string `bson:"name" json:"name"`
 	Email string `bson:"email" json:"email"`
 	Phone string `bson:"phone,omitempty" json:"phone,omitempty"`
+
+	// LoginKey is tenant + email, and is absent for a customer who has never
+	// registered. The sparse unique index on it is what enforces one login
+	// per email per business while allowing any number of guests, who have
+	// no email at all. See models.LoginKey.
+	LoginKey string `bson:"login_key,omitempty" json:"-"`
+
+	// ContactKey is tenant + normalised phone, and is what makes a guest
+	// booking twice one customer rather than two. See models.ContactKey.
+	ContactKey string `bson:"contact_key,omitempty" json:"-"`
 
 	// PasswordHash must never reach a response. The json:"-" here is a
 	// backstop, not the mechanism: nothing serialises a models.User

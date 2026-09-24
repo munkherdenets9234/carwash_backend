@@ -36,7 +36,7 @@ func (h *attendanceController) ClockIn(c *gin.Context) error {
 		return err
 	}
 
-	entry, err := h.attendance.ClockIn(c.Request.Context(), apictx.UserID(c), req.LocationID, req.Lat, req.Lng)
+	entry, err := h.attendance.ClockIn(c.Request.Context(), apictx.TenantID(c), apictx.UserID(c), req.LocationID, req.Lat, req.Lng)
 	if err != nil {
 		return err
 	}
@@ -62,7 +62,7 @@ func (h *attendanceController) ClockOut(c *gin.Context) error {
 		return err
 	}
 
-	entry, err := h.attendance.ClockOut(c.Request.Context(), apictx.UserID(c), req.Lat, req.Lng)
+	entry, err := h.attendance.ClockOut(c.Request.Context(), apictx.TenantID(c), apictx.UserID(c), req.Lat, req.Lng)
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,7 @@ func (h *attendanceController) ClockOut(c *gin.Context) error {
 // the app renders a button for, and making the normal case an error status
 // means every client has to special-case it.
 func (h *attendanceController) Current(c *gin.Context) error {
-	entry, err := h.attendance.Current(c.Request.Context(), apictx.UserID(c))
+	entry, err := h.attendance.Current(c.Request.Context(), apictx.TenantID(c), apictx.UserID(c))
 	if err != nil {
 		return err
 	}
@@ -106,7 +106,7 @@ func (h *attendanceController) Timesheet(c *gin.Context) error {
 	}
 	me := apictx.UserID(c)
 
-	entries, err := h.attendance.Timesheet(c.Request.Context(), repository.TimeEntryQuery{
+	entries, err := h.attendance.Timesheet(c.Request.Context(), apictx.TenantID(c), repository.TimeEntryQuery{
 		EmployeeID: &me,
 		From:       from,
 		To:         to,
@@ -115,7 +115,7 @@ func (h *attendanceController) Timesheet(c *gin.Context) error {
 		return err
 	}
 
-	resolved, err := h.resolver.ForTimeEntries(c.Request.Context(), entries)
+	resolved, err := h.resolver.ForTimeEntries(c.Request.Context(), apictx.TenantID(c), entries)
 	if err != nil {
 		return err
 	}
@@ -135,7 +135,7 @@ func (h *attendanceController) Timesheet(c *gin.Context) error {
 }
 
 func (h *attendanceController) render(c *gin.Context, e *models.TimeEntry) (view.TimeEntry, error) {
-	resolved, err := h.resolver.ForTimeEntries(c.Request.Context(), []*models.TimeEntry{e})
+	resolved, err := h.resolver.ForTimeEntries(c.Request.Context(), apictx.TenantID(c), []*models.TimeEntry{e})
 	if err != nil {
 		return view.TimeEntry{}, err
 	}

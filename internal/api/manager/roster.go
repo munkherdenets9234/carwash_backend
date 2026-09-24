@@ -35,12 +35,12 @@ func (h *rosterController) Create(c *gin.Context) error {
 		return apierr.ValidationFailed("start_at and end_at are required, as RFC 3339 timestamps")
 	}
 
-	sh, err := h.schedule.AddShift(c.Request.Context(), req.EmployeeID, req.LocationID, req.StartAt, req.EndAt)
+	sh, err := h.schedule.AddShift(c.Request.Context(), apictx.TenantID(c), req.EmployeeID, req.LocationID, req.StartAt, req.EndAt)
 	if err != nil {
 		return err
 	}
 
-	resolved, err := h.resolver.ForShifts(c.Request.Context(), []*models.Shift{sh})
+	resolved, err := h.resolver.ForShifts(c.Request.Context(), apictx.TenantID(c), []*models.Shift{sh})
 	if err != nil {
 		return err
 	}
@@ -64,7 +64,7 @@ func (h *rosterController) List(c *gin.Context) error {
 		return err
 	}
 
-	rows, err := h.schedule.ListShifts(c.Request.Context(), repository.ShiftQuery{
+	rows, err := h.schedule.ListShifts(c.Request.Context(), apictx.TenantID(c), repository.ShiftQuery{
 		EmployeeID: employeeID,
 		LocationID: locationID,
 		From:       from,
@@ -74,7 +74,7 @@ func (h *rosterController) List(c *gin.Context) error {
 		return err
 	}
 
-	resolved, err := h.resolver.ForShifts(c.Request.Context(), rows)
+	resolved, err := h.resolver.ForShifts(c.Request.Context(), apictx.TenantID(c), rows)
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func (h *rosterController) Delete(c *gin.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := h.schedule.DeleteShift(c.Request.Context(), id); err != nil {
+	if err := h.schedule.DeleteShift(c.Request.Context(), apictx.TenantID(c), id); err != nil {
 		return err
 	}
 	response.NoContent(c)

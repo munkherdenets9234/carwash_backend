@@ -17,10 +17,18 @@ type GeoPoint struct {
 
 // Location is one wash site.
 type Location struct {
-	ID      primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	Name    string             `bson:"name" json:"name"`
-	Address string             `bson:"address" json:"address"`
-	Point   GeoPoint           `bson:"point" json:"point"`
+	ID primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	// TenantID is the business this row belongs to. Every query filters on
+	// it, in the filter itself rather than as a check after the read, so a
+	// forgotten scope is an empty result rather than another business data.
+	//
+	// json:"-" because it is never on the wire: a client already proved
+	// which tenant it is by presenting the API key, and echoing the id back
+	// tells it nothing it can use.
+	TenantID primitive.ObjectID `bson:"tenant_id" json:"-"`
+	Name     string             `bson:"name" json:"name"`
+	Address  string             `bson:"address" json:"address"`
+	Point    GeoPoint           `bson:"point" json:"point"`
 
 	// GeofenceRadiusM is how far from Point a clock-in is still accepted.
 	//

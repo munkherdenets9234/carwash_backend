@@ -30,7 +30,7 @@ func (h *jobsController) List(c *gin.Context) error {
 	}
 	me := apictx.UserID(c)
 
-	rows, err := h.reservations.List(c.Request.Context(), repository.ReservationQuery{
+	rows, err := h.reservations.List(c.Request.Context(), apictx.TenantID(c), repository.ReservationQuery{
 		EmployeeID: &me,
 		From:       from,
 		To:         to,
@@ -39,7 +39,7 @@ func (h *jobsController) List(c *gin.Context) error {
 		return err
 	}
 
-	resolved, err := h.resolver.ForReservations(c.Request.Context(), rows)
+	resolved, err := h.resolver.ForReservations(c.Request.Context(), apictx.TenantID(c), rows)
 	if err != nil {
 		return err
 	}
@@ -69,15 +69,15 @@ func (h *jobsController) SetStatus(c *gin.Context) error {
 	}
 
 	me := apictx.UserID(c)
-	if err := h.reservations.SetStatus(c.Request.Context(), id, req.Status, &me); err != nil {
+	if err := h.reservations.SetStatus(c.Request.Context(), apictx.TenantID(c), id, req.Status, &me); err != nil {
 		return err
 	}
 
-	res, err := h.reservations.Get(c.Request.Context(), id)
+	res, err := h.reservations.Get(c.Request.Context(), apictx.TenantID(c), id)
 	if err != nil {
 		return err
 	}
-	resolved, err := h.resolver.ForReservations(c.Request.Context(), []*models.Reservation{res})
+	resolved, err := h.resolver.ForReservations(c.Request.Context(), apictx.TenantID(c), []*models.Reservation{res})
 	if err != nil {
 		return err
 	}
@@ -95,7 +95,7 @@ func (h *jobsController) Shifts(c *gin.Context) error {
 	}
 	me := apictx.UserID(c)
 
-	rows, err := h.schedule.ListShifts(c.Request.Context(), repository.ShiftQuery{
+	rows, err := h.schedule.ListShifts(c.Request.Context(), apictx.TenantID(c), repository.ShiftQuery{
 		EmployeeID: &me,
 		From:       from,
 		To:         to,
@@ -104,7 +104,7 @@ func (h *jobsController) Shifts(c *gin.Context) error {
 		return err
 	}
 
-	resolved, err := h.resolver.ForShifts(c.Request.Context(), rows)
+	resolved, err := h.resolver.ForShifts(c.Request.Context(), apictx.TenantID(c), rows)
 	if err != nil {
 		return err
 	}

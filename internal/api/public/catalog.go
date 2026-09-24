@@ -1,6 +1,7 @@
 package public
 
 import (
+	"github.com/eandstravel/carwash/internal/api/apictx"
 	"github.com/eandstravel/carwash/internal/service"
 	"github.com/eandstravel/carwash/internal/view"
 	"github.com/eandstravel/carwash/pkg/response"
@@ -19,7 +20,7 @@ type catalogController struct {
 // guessed it. The manager's own listing is a different route with a
 // different response type.
 func (h *catalogController) ListServices(c *gin.Context) error {
-	items, err := h.svc.ListWashServices(c.Request.Context(), true)
+	items, err := h.svc.ListWashServices(c.Request.Context(), apictx.TenantID(c), true)
 	if err != nil {
 		return err
 	}
@@ -28,7 +29,7 @@ func (h *catalogController) ListServices(c *gin.Context) error {
 }
 
 func (h *catalogController) ListLocations(c *gin.Context) error {
-	items, err := h.svc.ListLocations(c.Request.Context(), true)
+	items, err := h.svc.ListLocations(c.Request.Context(), apictx.TenantID(c), true)
 	if err != nil {
 		return err
 	}

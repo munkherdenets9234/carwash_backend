@@ -22,15 +22,19 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/eandstravel/carwash/internal/api"
 	"github.com/eandstravel/carwash/internal/config"
+	"github.com/eandstravel/carwash/internal/entitlement"
 	"github.com/eandstravel/carwash/internal/middleware"
 	"github.com/eandstravel/carwash/internal/repository"
 	"github.com/eandstravel/carwash/pkg/token"
 	"github.com/gin-gonic/gin"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.uber.org/zap"
@@ -94,12 +98,30 @@ func NewForDatabase(ctx context.Context, cfg *config.Config, db *mongo.Database,
 	r := newRepos(db)
 	s := newServices(r, maker, cfg, log)
 
-	// Bootstrapping the first manager is optional: a deployment that
-	// already has one does not need the variables, and one with neither is
-	// a deployment nobody can log into — worth a loud error, not a refusal
-	// to start, since an operator can create the account another way.
+	// The platform link. Optional in the same sense as every other
+	// dependency here: without it the process still starts, still serves
+	// /healthz and /readyz, and says on both that it cannot resolve tenants.
+	// The data routes then answer FEATURE_UNAVAILABLE, which is a far more
+	// useful thing for an operator to see than a process that will not boot.
+	entClient := entitlement.NewClient(entitlement.Config{
+		BaseURL:     cfg.TenantcoreURL,
+		ServiceKey:  cfg.TenantcoreServiceKey,
+		TTL:         cfg.EntitlementTTL,
+		GraceWindow: cfg.EntitlementGrace,
+		Log:         log,
+	})
+
+	// Bootstrapping the first manager is optional, and now belongs to ONE
+	// named tenant: "create the first manager at startup" was a
+	// single-business idea, and multi-tenancy leaves no single business to
+	// create one for. This is the development and demo path only — see
+	// config.BootstrapTenantID for what production still needs.
 	if cfg.ManagerBootstrapEnabled() {
-		if err := s.staff.EnsureBootstrapManager(ctx, cfg.ManagerName, cfg.ManagerEmail, cfg.ManagerPassword); err != nil {
+		tenantID, err := primitive.ObjectIDFromHex(cfg.BootstrapTenantID)
+		if err != nil {
+			log.Error("manager bootstrap skipped — BOOTSTRAP_TENANT_ID is not a valid id",
+				zap.String("value", cfg.BootstrapTenantID))
+		} else if err := s.staff.EnsureBootstrapManager(ctx, tenantID, cfg.ManagerName, cfg.ManagerEmail, cfg.ManagerPassword); err != nil {
 			log.Error("manager bootstrap failed — no manager was created from the environment",
 				zap.Error(err))
 		}
@@ -107,11 +129,12 @@ func NewForDatabase(ctx context.Context, cfg *config.Config, db *mongo.Database,
 
 	limiter := middleware.NewRateLimiter()
 
-	srv := api.NewServer(api.Deps{
+	deps := api.Deps{
 		Config: cfg,
 		Log:    log,
 
 		Auth:        middleware.NewAuth(maker, r.users),
+		Tenant:      middleware.NewTenant(entClient, cfg.Module),
 		RateLimiter: limiter,
 
 		AuthSvc:      s.auth,
@@ -123,7 +146,13 @@ func NewForDatabase(ctx context.Context, cfg *config.Config, db *mongo.Database,
 		Attendance:   s.attendance,
 		Reports:      s.reports,
 		Resolver:     s.resolver,
-	})
+		Media:        s.media,
+	}
+
+	if err := requireWired(deps); err != nil {
+		return nil, err
+	}
+	srv := api.NewServer(deps)
 
 	return &App{Config: cfg, Log: log, Engine: srv.Handler(), limiter: limiter}, nil
 }
@@ -131,10 +160,46 @@ func NewForDatabase(ctx context.Context, cfg *config.Config, db *mongo.Database,
 // Run serves until SIGINT/SIGTERM, then shuts down cleanly.
 func (a *App) Run() error {
 	srv := &http.Server{
-		Addr:         ":" + a.Config.AppPort,
-		Handler:      a.Engine,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		Addr:    ":" + a.Config.AppPort,
+		Handler: a.Engine,
+
+		// ReadHeaderTimeout is the tight one, and it is the one that matters.
+		// It is what stops a client from opening a connection and dribbling
+		// headers forever to hold a goroutine hostage. It does not care how
+		// large the body is or how long the handler runs, so it can stay
+		// short without breaking anything slow and legitimate.
+		ReadHeaderTimeout: 15 * time.Second,
+
+		// ReadTimeout and WriteTimeout cover the BODY and the HANDLER, and
+		// they were both 15s here, which was wrong: an image upload is the
+		// one request in this service that is routinely slower than that.
+		//
+		// The symptom was not a clean error. WriteTimeout is measured from
+		// the end of the header read, so it covers the round trip to the
+		// image host. A 30s upload finished, stored the row, logged 201 —
+		// and Go had already torn the connection down, so the caller saw the
+		// backend go unreachable. The photograph was uploaded; the manager
+		// was told it was not. On a replace, that also meant the delete of
+		// the old picture never ran, leaving a duplicate nobody asked for.
+		//
+		// A silent success reported as a failure is worse than a slow
+		// request, so these are now sized for the slowest thing the service
+		// legitimately does: a 10 MiB photograph sent from a phone on mobile
+		// data, then forwarded to an image host that has been observed
+		// taking 25-35s from here.
+		//
+		// The cost is honest and worth stating: a handler wedged on a
+		// dependency now holds its connection for minutes rather than
+		// seconds. What bounds the damage is not this timeout — it is the
+		// body size cap and the per-request context deadlines inside the
+		// handlers, which are the right place for it, because only the
+		// handler knows what it is waiting on.
+		ReadTimeout:  a.Config.HTTPReadTimeout,
+		WriteTimeout: a.Config.HTTPWriteTimeout,
+
+		// Without this a keep-alive connection that goes quiet is held until
+		// the client gives up.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -208,4 +273,44 @@ func connectMongo(ctx context.Context, cfg *config.Config, log *zap.Logger) (*mo
 	}
 	log.Info("mongodb connected", zap.String("database", cfg.MongoDB))
 	return client, client.Database(cfg.MongoDB), nil
+}
+
+// requireWired refuses to start when a dependency was built but never handed
+// to the router.
+//
+// This exists because of a real bug: the media service was constructed, the
+// routes were registered, the tests were green, and every photograph request
+// answered 500 — because one line was missing from the struct literal above.
+// A forgotten field in a Go composite literal is not an error, it is the zero
+// value, so the cost of the mistake is paid by the first customer to load the
+// page rather than by the deploy.
+//
+// Reflection rather than a list of checks on purpose: a list has to be
+// updated when a field is added, which is the same act of remembering that
+// failed in the first place. Every pointer, interface and map field must be
+// non-nil, so a new dependency is covered the moment it is declared.
+//
+// It fails the boot rather than logging. An unreachable feature is not the
+// degraded-but-serving state the optional dependencies above are about: there
+// is no configuration to fix and nothing an operator can do at runtime, it is
+// simply a build that should not be deployed.
+func requireWired(d api.Deps) error {
+	v := reflect.ValueOf(d)
+	t := v.Type()
+	var missing []string
+	for i := 0; i < t.NumField(); i++ {
+		f := v.Field(i)
+		switch f.Kind() {
+		case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func:
+			if f.IsNil() {
+				missing = append(missing, t.Field(i).Name)
+			}
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("router dependencies not wired: %s — these were left out of the "+
+			"api.Deps literal in bootstrap, so every route using them would answer 500",
+			strings.Join(missing, ", "))
+	}
+	return nil
 }

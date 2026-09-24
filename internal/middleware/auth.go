@@ -33,6 +33,13 @@ func NewAuth(maker *token.Maker, users *repository.UserRepo) *Auth {
 // Require verifies the bearer token, loads the user behind it, and checks
 // their role is one of roles. With no roles given it authenticates only.
 //
+// It must be mounted AFTER Tenant.Require, and it loads the user within that
+// tenant. That is what stops a token issued by business A being replayed
+// against business B: the token carries a user id, the id is looked up inside
+// the tenant the API key resolved to, and a user id from another business
+// simply is not there. Without the tenant in the lookup, a valid token from
+// any tenant would authenticate against any other.
+//
 // It costs one indexed lookup by _id per authenticated request, and that is
 // the point. A token-only check is stateless and fast, and it also means a
 // suspended employee keeps every permission they had until their token
@@ -64,7 +71,16 @@ func (a *Auth) Require(roles ...models.Role) gin.HandlerFunc {
 			return
 		}
 
-		user, err := a.users.FindByID(c.Request.Context(), id)
+		tenantID, ok := TenantFrom(c)
+		if !ok {
+			// A routing mistake, not a client error: this middleware is
+			// mounted without the tenant middleware ahead of it. Say which,
+			// rather than emitting a bare 500 nobody can trace.
+			fail(c, apierr.Internal(errors.New("auth middleware mounted without the tenant middleware ahead of it")))
+			return
+		}
+
+		user, err := a.users.FindByID(c.Request.Context(), tenantID, id)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
 				fail(c, apierr.Unauthorized("this session is no longer valid"))

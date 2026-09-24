@@ -47,7 +47,7 @@ type LocationInput struct {
 	Active          *bool
 }
 
-func (s *CatalogService) CreateLocation(ctx context.Context, in LocationInput) (*models.Location, error) {
+func (s *CatalogService) CreateLocation(ctx context.Context, tenantID primitive.ObjectID, in LocationInput) (*models.Location, error) {
 	if strings.TrimSpace(in.Name) == "" {
 		return nil, apierr.ValidationFailed("name is required")
 	}
@@ -63,6 +63,7 @@ func (s *CatalogService) CreateLocation(ctx context.Context, in LocationInput) (
 		active = *in.Active
 	}
 	l := &models.Location{
+		TenantID:        tenantID,
 		Name:            strings.TrimSpace(in.Name),
 		Address:         strings.TrimSpace(in.Address),
 		Point:           models.GeoPoint{Lat: in.Lat, Lng: in.Lng},
@@ -75,16 +76,16 @@ func (s *CatalogService) CreateLocation(ctx context.Context, in LocationInput) (
 	return l, nil
 }
 
-func (s *CatalogService) ListLocations(ctx context.Context, activeOnly bool) ([]*models.Location, error) {
-	out, err := s.locations.List(ctx, activeOnly)
+func (s *CatalogService) ListLocations(ctx context.Context, tenantID primitive.ObjectID, activeOnly bool) ([]*models.Location, error) {
+	out, err := s.locations.List(ctx, tenantID, activeOnly)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
 	return out, nil
 }
 
-func (s *CatalogService) GetLocation(ctx context.Context, id primitive.ObjectID) (*models.Location, error) {
-	l, err := s.locations.FindByID(ctx, id)
+func (s *CatalogService) GetLocation(ctx context.Context, tenantID primitive.ObjectID, id primitive.ObjectID) (*models.Location, error) {
+	l, err := s.locations.FindByID(ctx, tenantID, id)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("location").In(apierr.DomainCatalog)
@@ -94,7 +95,7 @@ func (s *CatalogService) GetLocation(ctx context.Context, id primitive.ObjectID)
 	return l, nil
 }
 
-func (s *CatalogService) UpdateLocation(ctx context.Context, id primitive.ObjectID, in LocationInput) error {
+func (s *CatalogService) UpdateLocation(ctx context.Context, tenantID primitive.ObjectID, id primitive.ObjectID, in LocationInput) error {
 	set := bson.M{}
 	if strings.TrimSpace(in.Name) != "" {
 		set["name"] = strings.TrimSpace(in.Name)
@@ -121,7 +122,7 @@ func (s *CatalogService) UpdateLocation(ctx context.Context, id primitive.Object
 		return apierr.ValidationFailed("no fields to update")
 	}
 
-	if err := s.locations.Update(ctx, id, set); err != nil {
+	if err := s.locations.Update(ctx, tenantID, id, set); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return apierr.NotFound("location").In(apierr.DomainCatalog)
 		}
@@ -141,7 +142,7 @@ type WashServiceInput struct {
 	Active      *bool
 }
 
-func (s *CatalogService) CreateWashService(ctx context.Context, in WashServiceInput) (*models.WashService, error) {
+func (s *CatalogService) CreateWashService(ctx context.Context, tenantID primitive.ObjectID, in WashServiceInput) (*models.WashService, error) {
 	if err := validateWashService(in, true); err != nil {
 		return nil, err
 	}
@@ -150,6 +151,7 @@ func (s *CatalogService) CreateWashService(ctx context.Context, in WashServiceIn
 		active = *in.Active
 	}
 	ws := &models.WashService{
+		TenantID:    tenantID,
 		Name:        strings.TrimSpace(in.Name),
 		Description: strings.TrimSpace(in.Description),
 		DurationMin: in.DurationMin,
@@ -163,16 +165,16 @@ func (s *CatalogService) CreateWashService(ctx context.Context, in WashServiceIn
 	return ws, nil
 }
 
-func (s *CatalogService) ListWashServices(ctx context.Context, activeOnly bool) ([]*models.WashService, error) {
-	out, err := s.services.List(ctx, activeOnly)
+func (s *CatalogService) ListWashServices(ctx context.Context, tenantID primitive.ObjectID, activeOnly bool) ([]*models.WashService, error) {
+	out, err := s.services.List(ctx, tenantID, activeOnly)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
 	return out, nil
 }
 
-func (s *CatalogService) GetWashService(ctx context.Context, id primitive.ObjectID) (*models.WashService, error) {
-	ws, err := s.services.FindByID(ctx, id)
+func (s *CatalogService) GetWashService(ctx context.Context, tenantID primitive.ObjectID, id primitive.ObjectID) (*models.WashService, error) {
+	ws, err := s.services.FindByID(ctx, tenantID, id)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("service").In(apierr.DomainCatalog)
@@ -182,7 +184,7 @@ func (s *CatalogService) GetWashService(ctx context.Context, id primitive.Object
 	return ws, nil
 }
 
-func (s *CatalogService) UpdateWashService(ctx context.Context, id primitive.ObjectID, in WashServiceInput) error {
+func (s *CatalogService) UpdateWashService(ctx context.Context, tenantID primitive.ObjectID, id primitive.ObjectID, in WashServiceInput) error {
 	if err := validateWashService(in, false); err != nil {
 		return err
 	}
@@ -212,7 +214,7 @@ func (s *CatalogService) UpdateWashService(ctx context.Context, id primitive.Obj
 	// Worth being explicit about what this does NOT do: changing a price
 	// here leaves every existing reservation untouched, because each one
 	// copied the price it was booked at. Yesterday's report will not move.
-	if err := s.services.Update(ctx, id, set); err != nil {
+	if err := s.services.Update(ctx, tenantID, id, set); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return apierr.NotFound("service").In(apierr.DomainCatalog)
 		}

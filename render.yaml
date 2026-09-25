@@ -1,0 +1,78 @@
+# Render deploy config for the car wash backend.
+#
+# There was no render.yaml, Dockerfile or Procfile in this repo before this
+# file — a service created by connecting the repo directly to Render has its
+# Build Command and Start Command typed into the dashboard by hand, which is
+# invisible to anyone reading the repository and easy to leave at a default
+# that does not match it.
+#
+# That mismatch is the likely cause of the build failure this file exists to
+# fix: the main package lives at ./cmd/api, not the repository root, and
+# Render's default Go build (`go build -o app .`) fails outright against a
+# root with no main package. `go build ./cmd/api` from a clean checkout, with
+# nothing else configured, succeeds — this was verified before writing the
+# command below.
+#
+# This file only takes effect automatically if the Render service is created
+# or synced from a Blueprint (New > Blueprint, pointing at this repo). An
+# EXISTING service created by connecting the repo directly does not read this
+# file — its Build Command and Start Command have to be updated by hand in
+# the dashboard to match what is written here, or recreated as a Blueprint.
+services:
+  - type: web
+    name: carwash-backend
+    runtime: go
+    plan: starter
+    branch: feature/tenant-adoption-and-guest-booking
+    buildCommand: go build -o bin/api ./cmd/api
+    startCommand: ./bin/api
+    healthCheckPath: /healthz
+    envVars:
+      # Render injects PORT itself; the app already reads it
+      # (getEnv("PORT", ...) in internal/config/config.go) and needs nothing
+      # set here for it.
+      - key: APP_ENV
+        value: production
+      - key: TIMEZONE
+        value: Asia/Ulaanbaatar
+
+      # ── Required — a missing one of these stops the process at startup ──
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: carwash
+      - key: TOKEN_SECRET
+        sync: false
+      # Blank starts a fresh deployment with nobody who can log in, which is
+      # the correct default: a wrong value here creates a real account.
+      - key: MANAGER_EMAIL
+        sync: false
+      - key: MANAGER_PASSWORD
+        sync: false
+
+      # ── The platform link (tenantcore) ──
+      - key: TENANTCORE_URL
+        sync: false
+      - key: TENANTCORE_SERVICE_KEY
+        sync: false
+      - key: CARWASH_MODULE
+        value: carwash
+      - key: BOOTSTRAP_TENANT_ID
+        sync: false
+
+      # ── CORS — the frontend's deployed origin, no wildcard ──
+      - key: CORS_ORIGINS
+        sync: false
+
+      # Off in production regardless — config.Validate refuses to start
+      # with APP_ENV=production and this true — set explicitly so the
+      # dashboard shows the real, intentional value rather than a blank
+      # that only happens to resolve the same way.
+      - key: DEMO_CONSOLE
+        value: "false"
+
+      # Optional; a Cloudinary account is what makes the gallery upload
+      # route answer instead of 503 FEATURE_UNAVAILABLE. Blank is a
+      # supported, working state — the rest of the service is unaffected.
+      - key: CLOUDINARY_URL
+        sync: false

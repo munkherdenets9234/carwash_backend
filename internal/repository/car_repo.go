@@ -63,6 +63,26 @@ func (r *CarRepo) FindByPlateForOwner(ctx context.Context, tenantID, ownerID pri
 	return &c, nil
 }
 
+// FindByPlate resolves a plate anywhere in the business, whoever owns it.
+//
+// Plates are unique per OWNER, not per tenant — see models.Car — so this can
+// in principle see more than one row: a car sold on, with the previous
+// owner's record still present. It returns the most recently created, which
+// is the nearest thing to "whoever drives it now" that the data supports.
+//
+// Used by the walk-in desk, where a plate is all anyone types. It is
+// deliberately not exposed to customers: which cars a business has seen is
+// not something an anonymous caller may enumerate.
+func (r *CarRepo) FindByPlate(ctx context.Context, tenantID primitive.ObjectID, plate string) (*models.Car, error) {
+	var c models.Car
+	opts := options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}})
+	err := r.col.FindOne(ctx, scoped(tenantID, bson.M{"plate": NormalizePlate(plate)}), opts).Decode(&c)
+	if err != nil {
+		return nil, translate(err)
+	}
+	return &c, nil
+}
+
 func (r *CarRepo) ListByOwner(ctx context.Context, tenantID, ownerID primitive.ObjectID) ([]*models.Car, error) {
 	cur, err := r.col.Find(ctx,
 		scoped(tenantID, bson.M{"owner_id": ownerID}),

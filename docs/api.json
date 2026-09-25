@@ -2004,6 +2004,69 @@
             "$ref": "#/components/responses/PlatformUnavailable"
           }
         }
+      },
+      "post": {
+        "tags": [
+          "Manager"
+        ],
+        "operationId": "registerWalkIn",
+        "summary": "Register a car that is on the forecourt now",
+        "description": "The desk, not the website. Somebody has driven in, the manager has thirty seconds and a queue behind them, and the only thing they can read off the car is its plate. So the form is a plate, a service and a washer; the time is now, the job starts immediately, and the customer is whoever owns that plate.\n\nThree rules the online flow enforces are deliberately relaxed here:\n\n1. The start time is now rather than in the future. Online that would be a mistake; here it is the point.\n2. The roster is not consulted. A walk-in arrives when it arrives, and refusing to record work that is visibly happening because nobody rostered that hour sends the manager to a paper notebook - and from that moment the day report is no longer true.\n3. Overlap with the washer's other jobs is allowed. A manager standing in front of both cars knows something the roster does not.\n\nWhat is NOT relaxed: a suspended employee is refused, an inactive service or location is refused, and the price and bonus are copied from the catalogue at registration time. Those are not scheduling rules - they are what makes the row correct afterwards.\n\nThe plate is find-or-create. A plate the business has seen keeps its existing owner, so a registered customer who drives in today gets this wash in the history they already have. A plate nobody has seen gets a customer of its own named after it: a reservation needs a customer, and one shared 'walk-in' account would make every returning driver indistinguishable in the list a manager uses to recognise them.\n\nSeparate from POST /bookings on purpose. That route is open to the internet and rate limited per IP, so one busy desk would trip the limiter from a single address, and it insists on a telephone number - the field this exists to avoid asking for.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "plate",
+                  "employee_id",
+                  "service_id",
+                  "location_id"
+                ],
+                "properties": {
+                  "plate": {
+                    "type": "string",
+                    "example": "1234 UBA",
+                    "description": "Spaces are removed and letters upper-cased before it is stored or compared, so the same plate typed differently is still the same car."
+                  },
+                  "employee_id": {
+                    "$ref": "#/components/schemas/ObjectId"
+                  },
+                  "service_id": {
+                    "$ref": "#/components/schemas/ObjectId"
+                  },
+                  "location_id": {
+                    "$ref": "#/components/schemas/ObjectId"
+                  },
+                  "notes": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/StaffReservationOk"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/PlatformUnavailable"
+          }
+        }
       }
     },
     "/api/v1/manager/reservations/{id}/assign": {
@@ -2490,6 +2553,100 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/PlatformUnavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/manager/reservations/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ObjectId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Manager"
+        ],
+        "operationId": "showReservation",
+        "summary": "One booking",
+        "description": "Everything the manager may see on a single booking, including the bonus and the customer's telephone number. Exists so a detail screen has its own address: reachable from a phone list, a link in a message or a bookmark, rather than only by finding the row again in whichever day was on screen.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/StaffReservationOk"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "402": {
+            "$ref": "#/components/responses/PaymentRequired"
+          },
+          "503": {
+            "$ref": "#/components/responses/PlatformUnavailable"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Manager"
+        ],
+        "operationId": "editReservation",
+        "summary": "Correct a recorded booking",
+        "description": "Three fields, each one a mistake somebody actually makes at a desk: the plate was mistyped, the wrong service was tapped, or the car went in half an hour before anyone registered it.\n\nSend only what changed. Every field is optional and an absent one is left alone, so a screen that edits the plate does not have to send - and risk clobbering - the other two.\n\nChanging the service re-copies the price and the bonus from the catalogue, and recomputes the end time from the new duration. Changing the start time recomputes the end time too. Changing the plate moves the booking to that car, and the customer moves with it: a booking belongs to whoever owns the vehicle being washed.\n\nUnlike /assign, this is allowed on a COMPLETED booking. A correction that cannot be applied to yesterday is not a correction, it is a second wrong number sitting next to the first. The day report is computed from these rows, so yesterday's figure changes when yesterday's row does - including a washer's bonus. That is intended, and it is why this route is manager-only.\n\nA cancelled or no-show booking cannot be edited. Nothing happened, so there is nothing to correct; registering the wash again is both easier to do and easier to read afterwards.\n\nThe roster is not consulted and overlap is not checked, for the same reason as the walk-in desk: the manager is the one holding the information. The slot key still applies while the booking is open, so two jobs cannot land on one washer at one instant.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "At least one field. Anything omitted is left unchanged.",
+                "properties": {
+                  "plate": {
+                    "type": "string",
+                    "example": "1234 UBA"
+                  },
+                  "service_id": {
+                    "$ref": "#/components/schemas/ObjectId"
+                  },
+                  "start_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/StaffReservationOk"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "The booking was cancelled, or that washer already has a job at that instant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"

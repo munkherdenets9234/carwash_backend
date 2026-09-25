@@ -76,6 +76,13 @@ func Register(base *gin.RouterGroup, d Deps) {
 	// Every booking, and the two things a manager does to one.
 	r := g.Group("/reservations")
 	r.GET("", jobs.List)
+	// The walk-in desk. Creating a booking from the manager surface exists
+	// only for cars already on the forecourt — see ReservationService.RegisterWalkIn.
+	r.POST("", jobs.RegisterWalkIn)
+	// Correcting what was recorded: the plate, the service, the time. Wider
+	// than /assign allows on purpose — see ReservationService.EditReservation.
+	r.GET("/:id", jobs.Show)
+	r.PUT("/:id", jobs.Edit)
 	r.PUT("/:id/assign", jobs.Assign)
 	r.PUT("/:id/status", jobs.SetStatus)
 

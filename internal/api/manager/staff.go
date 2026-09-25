@@ -34,7 +34,7 @@ func (h *staffController) Create(c *gin.Context) error {
 		return err
 	}
 
-	u, err := h.svc.Create(c.Request.Context(), service.NewStaffInput{
+	u, err := h.svc.Create(c.Request.Context(), apictx.TenantID(c), service.NewStaffInput{
 		Role:           req.Role,
 		Name:           req.Name,
 		Email:          req.Email,
@@ -52,11 +52,11 @@ func (h *staffController) Create(c *gin.Context) error {
 
 // List returns managers and employees together — the personnel list.
 func (h *staffController) List(c *gin.Context) error {
-	managers, err := h.svc.ListManagers(c.Request.Context())
+	managers, err := h.svc.ListManagers(c.Request.Context(), apictx.TenantID(c))
 	if err != nil {
 		return err
 	}
-	employees, err := h.svc.ListEmployees(c.Request.Context())
+	employees, err := h.svc.ListEmployees(c.Request.Context(), apictx.TenantID(c))
 	if err != nil {
 		return err
 	}
@@ -68,7 +68,7 @@ func (h *staffController) List(c *gin.Context) error {
 // contact details. Manager-only, and rendered as StaffMember rather than
 // through any type a customer route also uses.
 func (h *staffController) ListCustomers(c *gin.Context) error {
-	customers, err := h.svc.ListCustomers(c.Request.Context())
+	customers, err := h.svc.ListCustomers(c.Request.Context(), apictx.TenantID(c))
 	if err != nil {
 		return err
 	}
@@ -88,7 +88,7 @@ func (h *staffController) SetStatus(c *gin.Context) error {
 
 	// The acting manager's id is passed so the service can refuse a
 	// manager suspending themselves.
-	err := h.svc.SetStatus(c.Request.Context(), apictx.UserID(c).Hex(), c.Param("id"), req.Status)
+	err := h.svc.SetStatus(c.Request.Context(), apictx.TenantID(c), apictx.UserID(c).Hex(), c.Param("id"), req.Status)
 	if err != nil {
 		return err
 	}

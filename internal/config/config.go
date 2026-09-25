@@ -54,6 +54,57 @@ type Config struct {
 	ManagerEmail    string // blank (with password): no startup manager bootstrap
 	ManagerPassword string
 
+	// BootstrapTenantID names the tenant the startup manager belongs to.
+	//
+	// It exists because "create the first manager at startup" was a
+	// single-business idea and does not survive multi-tenancy: there is no
+	// longer one business to create a manager FOR. Every tenant needs its
+	// own first manager, and this only provisions one — the development and
+	// demo path.
+	//
+	// Provisioning a manager for a tenant that signs up in production is a
+	// real gap, and it is not this. It wants a machine-to-machine route the
+	// platform calls when a tenant buys the module.
+	BootstrapTenantID string
+
+	// ── The platform link ────────────────────────────────────────────────
+	//
+	// Where this service asks who a tenant is and what their plan permits.
+	// Optional in the sense every dependency here is optional: blank means
+	// the data routes answer FEATURE_UNAVAILABLE and say why, rather than
+	// the process refusing to boot.
+	TenantcoreURL        string
+	TenantcoreServiceKey string
+	// EntitlementTTL is how long an answer is trusted before refetching, and
+	// EntitlementGrace how long a stale one may still be served while the
+	// platform is unreachable.
+	EntitlementTTL   time.Duration
+	EntitlementGrace time.Duration
+
+	// Module is the entitlement key this service checks for. It matches the
+	// name in a plan MODULES list.
+	Module string
+
+	// ── Image uploads ────────────────────────────────────────────────────
+	//
+	// Blank disables uploading and nothing else: the site still renders,
+	// with the placeholder tiles it shipped with, and the upload route
+	// answers 503 FEATURE_UNAVAILABLE rather than the process refusing to
+	// start. Photographs have nothing to do with bookings or attendance.
+	CloudinaryURL  string
+	UploadMaxBytes int64
+
+	// HTTPReadTimeout and HTTPWriteTimeout bound how long a single request
+	// may spend receiving its body and producing its response.
+	//
+	// Configurable rather than constant because the right value depends on
+	// where the service is deployed and how far it is from its image host,
+	// which is not something a default can know. The defaults are sized for
+	// an upload over mobile data to a host that answers slowly; a deployment
+	// sitting next to its image host can safely cut them.
+	HTTPReadTimeout  time.Duration
+	HTTPWriteTimeout time.Duration
+
 	// DemoConsoleEnabled serves the single-page operator console at /demo.
 	// Off in production by default: it is a demonstration surface, and a
 	// deployment serving real customer bookings should not also ship an
@@ -94,7 +145,17 @@ func (c Config) IsDev() bool { return c.AppEnv != EnvProduction }
 // ManagerBootstrapEnabled reports whether a first manager should be created
 // at startup when none exists.
 func (c Config) ManagerBootstrapEnabled() bool {
-	return c.ManagerEmail != "" && c.ManagerPassword != ""
+	return c.ManagerEmail != "" && c.ManagerPassword != "" && c.BootstrapTenantID != ""
+}
+
+// UploadsEnabled reports whether an image host is configured.
+func (c Config) UploadsEnabled() bool { return c.CloudinaryURL != "" }
+
+// PlatformLinkEnabled reports whether this deployment can resolve tenants and
+// check subscriptions. Without it there is no way to know which business a
+// request belongs to, so every data route refuses.
+func (c Config) PlatformLinkEnabled() bool {
+	return c.TenantcoreURL != "" && c.TenantcoreServiceKey != ""
 }
 
 // Feature is one optional capability and whether this deployment has it.
@@ -115,9 +176,23 @@ type Feature struct {
 func (c Config) Features() []Feature {
 	return []Feature{
 		{
+			// The most important one on this list. Without the platform
+			// link this service cannot tell which business a request
+			// belongs to, so every data route refuses — the process is up
+			// and serving nothing.
+			Name:    "platform_link",
+			Enabled: c.PlatformLinkEnabled(),
+			Detail:  "TENANTCORE_URL/TENANTCORE_SERVICE_KEY are not both set — no tenant can be resolved, so every /api/v1 route answers 503 FEATURE_UNAVAILABLE",
+		},
+		{
+			Name:    "image_uploads",
+			Enabled: c.UploadsEnabled(),
+			Detail:  "CLOUDINARY_URL is not set — the gallery cannot be edited and POST /manager/media answers 503 FEATURE_UNAVAILABLE",
+		},
+		{
 			Name:    "manager_bootstrap",
 			Enabled: c.ManagerBootstrapEnabled(),
-			Detail:  "MANAGER_EMAIL/MANAGER_PASSWORD are not both set — no first manager is created, and a fresh database has nobody who can log in",
+			Detail:  "MANAGER_EMAIL/MANAGER_PASSWORD/BOOTSTRAP_TENANT_ID are not all set — no first manager is created, and a fresh database has nobody who can log in",
 		},
 		{
 			Name:    "rate_limiting",
@@ -216,9 +291,22 @@ func Load() *Config {
 		TokenSecret: getEnv("TOKEN_SECRET", ""),
 		TokenExpiry: getEnvInt("TOKEN_EXPIRY_HOURS", 12),
 
-		ManagerName:     getEnv("MANAGER_NAME", ""),
-		ManagerEmail:    getEnv("MANAGER_EMAIL", ""),
-		ManagerPassword: getEnv("MANAGER_PASSWORD", ""),
+		ManagerName:       getEnv("MANAGER_NAME", ""),
+		ManagerEmail:      getEnv("MANAGER_EMAIL", ""),
+		ManagerPassword:   getEnv("MANAGER_PASSWORD", ""),
+		BootstrapTenantID: getEnv("BOOTSTRAP_TENANT_ID", ""),
+
+		TenantcoreURL:        getEnv("TENANTCORE_URL", ""),
+		TenantcoreServiceKey: getEnv("TENANTCORE_SERVICE_KEY", ""),
+		EntitlementTTL:       getEnvDuration("ENTITLEMENT_TTL", 60*time.Second),
+		EntitlementGrace:     getEnvDuration("ENTITLEMENT_GRACE", 15*time.Minute),
+		Module:               getEnv("CARWASH_MODULE", "carwash"),
+
+		CloudinaryURL:  getEnv("CLOUDINARY_URL", ""),
+		UploadMaxBytes: int64(getEnvInt("UPLOAD_MAX_BYTES", 10<<20)), // 10 MiB
+
+		HTTPReadTimeout:  timeoutEnv("HTTP_READ_TIMEOUT_SEC", 120),
+		HTTPWriteTimeout: timeoutEnv("HTTP_WRITE_TIMEOUT_SEC", 180),
 
 		DemoConsoleEnabled: getEnvBool("DEMO_CONSOLE", env != EnvProduction),
 
@@ -278,4 +366,33 @@ func getEnvBool(key string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+// getEnvDuration reads a Go duration ("60s", "15m"), falling back on anything
+// unparseable rather than failing: a typo in a cache TTL should not stop the
+// service, and the fallback is a sane value rather than zero, which would
+// mean "never cache" and quietly put every request on the platform's path.
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	if v := getEnv(key, ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return fallback
+}
+
+// timeoutEnv reads a timeout in seconds, falling back to the default when the
+// value is absent or not positive.
+//
+// Zero is rejected rather than honoured because of what it means to
+// net/http: a zero Duration is not a short timeout, it is NO timeout. Setting
+// HTTP_WRITE_TIMEOUT_SEC=0 to "turn the timeout down" would quietly turn the
+// protection off instead, and nothing would say so until a wedged handler
+// held its connection forever. Somebody who genuinely wants no limit can set
+// a number large enough to say it out loud.
+func timeoutEnv(key string, defaultSeconds int) time.Duration {
+	if n := getEnvInt(key, defaultSeconds); n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return time.Duration(defaultSeconds) * time.Second
 }

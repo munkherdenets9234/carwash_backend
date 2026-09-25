@@ -56,14 +56,14 @@ func NewReportService(
 
 // Daily builds the report for the calendar day containing day, in the
 // business timezone.
-func (s *ReportService) Daily(ctx context.Context, day time.Time) (*DailyReport, error) {
+func (s *ReportService) Daily(ctx context.Context, tenantID primitive.ObjectID, day time.Time) (*DailyReport, error) {
 	from, to := DayRange(day, s.loc)
 
-	completed, err := s.bookings.CompletedBetween(ctx, from, to)
+	completed, err := s.bookings.CompletedBetween(ctx, tenantID, from, to)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
-	entries, err := s.entries.List(ctx, repository.TimeEntryQuery{From: from, To: to})
+	entries, err := s.entries.List(ctx, tenantID, repository.TimeEntryQuery{From: from, To: to})
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
@@ -75,7 +75,7 @@ func (s *ReportService) Daily(ctx context.Context, day time.Time) (*DailyReport,
 	for _, e := range report.Employees {
 		ids = append(ids, e.EmployeeID)
 	}
-	names, err := s.users.FindManyByIDs(ctx, ids)
+	names, err := s.users.FindManyByIDs(ctx, tenantID, ids)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}

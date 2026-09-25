@@ -28,7 +28,7 @@ func (h *reportController) Daily(c *gin.Context) error {
 		return err
 	}
 
-	report, err := h.reports.Daily(c.Request.Context(), day)
+	report, err := h.reports.Daily(c.Request.Context(), apictx.TenantID(c), day)
 	if err != nil {
 		return err
 	}

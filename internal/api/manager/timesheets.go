@@ -38,7 +38,7 @@ func (h *timesheetController) List(c *gin.Context) error {
 		return err
 	}
 
-	entries, err := h.attendance.Timesheet(c.Request.Context(), repository.TimeEntryQuery{
+	entries, err := h.attendance.Timesheet(c.Request.Context(), apictx.TenantID(c), repository.TimeEntryQuery{
 		EmployeeID: employeeID,
 		LocationID: locationID,
 		From:       from,
@@ -48,7 +48,7 @@ func (h *timesheetController) List(c *gin.Context) error {
 		return err
 	}
 
-	resolved, err := h.resolver.ForTimeEntries(c.Request.Context(), entries)
+	resolved, err := h.resolver.ForTimeEntries(c.Request.Context(), apictx.TenantID(c), entries)
 	if err != nil {
 		return err
 	}

@@ -39,12 +39,31 @@ func (s *Server) buildEngine() *gin.Engine {
 
 	s.registerOperational(e)
 
-	api := e.Group("/api/v1")
+	// Every data route below is tenant-scoped, and the gate is applied once,
+	// here, on the group they all hang off. Nothing underneath can opt out.
+	//
+	// The order is the argument: the tenant is resolved from X-API-Key
+	// first, because a bearer token is issued by one business and means
+	// nothing until we know which business the request claims to be for;
+	// then the subscription gate, which refuses only mutating calls; then
+	// each audience applies its own role check.
+	//
+	// The operational routes registered above stay outside it. A health
+	// check that needed a tenant API key could not be run by a monitor.
+	api := e.Group("/api/v1", d.Tenant.Require(), d.Tenant.RequireActiveSubscription())
 
 	public.Register(api, public.Deps{
-		Auth:          d.AuthSvc,
-		Catalog:       d.Catalog,
-		AuthRateLimit: s.limit("auth", d.Config.AuthRatePerMinute),
+		Auth:         d.AuthSvc,
+		Catalog:      d.Catalog,
+		Media:        d.Media,
+		Schedule:     d.Schedule,
+		Reservations: d.Reservations,
+		Staff:        d.Staff,
+		Resolver:     d.Resolver,
+		Loc:          d.Config.Location,
+
+		AuthRateLimit:    s.limit("auth", d.Config.AuthRatePerMinute),
+		BookingRateLimit: s.limit("booking", d.Config.BookingRatePerMinute),
 	})
 
 	// /me is the one authenticated route that is not audience-specific:
@@ -60,9 +79,7 @@ func (s *Server) buildEngine() *gin.Engine {
 		BookingRateLimit: s.limit("booking", d.Config.BookingRatePerMinute),
 		Loc:              d.Config.Location,
 		Cars:             d.Cars,
-		Schedule:         d.Schedule,
 		Reservations:     d.Reservations,
-		Staff:            d.Staff,
 		Resolver:         d.Resolver,
 	})
 
@@ -82,6 +99,7 @@ func (s *Server) buildEngine() *gin.Engine {
 		Loc:           d.Config.Location,
 		Staff:         d.Staff,
 		Catalog:       d.Catalog,
+		Media:         d.Media,
 		Schedule:      d.Schedule,
 		Reservations:  d.Reservations,
 		Attendance:    d.Attendance,
@@ -145,7 +163,26 @@ func (s *Server) registerOperational(e *gin.Engine) {
 	e.GET("/readyz", func(c *gin.Context) {
 		features := s.deps.Config.Features()
 		degraded := false
-		list := make([]gin.H, 0, len(features))
+		list := make([]gin.H, 0, len(features)+1)
+
+		// The platform link reports its RUNTIME state here, not just whether
+		// it was configured. A link that is configured and currently failing
+		// looks identical to a healthy one from the outside — the service
+		// keeps answering, from cache — right up until an entry ages out and
+		// a tenant is refused for no visible reason. This is the one place
+		// that difference is visible, which is the entire reason the client
+		// tracks it.
+		if s.deps.Tenant != nil {
+			if stale, since := s.deps.Tenant.PlatformDegraded(); stale {
+				degraded = true
+				entry := gin.H{"name": "platform_link_live", "enabled": false,
+					"detail": "the platform is unreachable; entitlements are being served from cache and will start failing once they age out"}
+				if since != nil {
+					entry["since"] = since.UTC()
+				}
+				list = append(list, entry)
+			}
+		}
 		for _, f := range features {
 			if !f.Enabled {
 				degraded = true

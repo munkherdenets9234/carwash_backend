@@ -35,7 +35,7 @@ func (h *carsController) Create(c *gin.Context) error {
 		return err
 	}
 
-	car, err := h.svc.Register(c.Request.Context(), apictx.UserID(c), req.input())
+	car, err := h.svc.Register(c.Request.Context(), apictx.TenantID(c), apictx.UserID(c), req.input())
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func (h *carsController) Create(c *gin.Context) error {
 }
 
 func (h *carsController) List(c *gin.Context) error {
-	cars, err := h.svc.ListMine(c.Request.Context(), apictx.UserID(c))
+	cars, err := h.svc.ListMine(c.Request.Context(), apictx.TenantID(c), apictx.UserID(c))
 	if err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func (h *carsController) Get(c *gin.Context) error {
 	if err != nil {
 		return err
 	}
-	car, err := h.svc.GetMine(c.Request.Context(), id, apictx.UserID(c))
+	car, err := h.svc.GetMine(c.Request.Context(), apictx.TenantID(c), id, apictx.UserID(c))
 	if err != nil {
 		return err
 	}
@@ -75,11 +75,11 @@ func (h *carsController) Update(c *gin.Context) error {
 	if err := apictx.Bind(c, &req); err != nil {
 		return err
 	}
-	if err := h.svc.Update(c.Request.Context(), id, apictx.UserID(c), req.input()); err != nil {
+	if err := h.svc.Update(c.Request.Context(), apictx.TenantID(c), id, apictx.UserID(c), req.input()); err != nil {
 		return err
 	}
 
-	car, err := h.svc.GetMine(c.Request.Context(), id, apictx.UserID(c))
+	car, err := h.svc.GetMine(c.Request.Context(), apictx.TenantID(c), id, apictx.UserID(c))
 	if err != nil {
 		return err
 	}
@@ -92,7 +92,7 @@ func (h *carsController) Delete(c *gin.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := h.svc.Delete(c.Request.Context(), id, apictx.UserID(c)); err != nil {
+	if err := h.svc.Delete(c.Request.Context(), apictx.TenantID(c), id, apictx.UserID(c)); err != nil {
 		return err
 	}
 	response.NoContent(c)

@@ -37,7 +37,7 @@ func (r washServiceRequest) input() service.WashServiceInput {
 // ListServices returns the whole price list, withdrawn entries included: a
 // manager's most likely reason to open this screen is to bring one back.
 func (h *catalogController) ListServices(c *gin.Context) error {
-	items, err := h.svc.ListWashServices(c.Request.Context(), false)
+	items, err := h.svc.ListWashServices(c.Request.Context(), apictx.TenantID(c), false)
 	if err != nil {
 		return err
 	}
@@ -50,7 +50,7 @@ func (h *catalogController) CreateService(c *gin.Context) error {
 	if err := apictx.Bind(c, &req); err != nil {
 		return err
 	}
-	ws, err := h.svc.CreateWashService(c.Request.Context(), req.input())
+	ws, err := h.svc.CreateWashService(c.Request.Context(), apictx.TenantID(c), req.input())
 	if err != nil {
 		return err
 	}
@@ -67,11 +67,11 @@ func (h *catalogController) UpdateService(c *gin.Context) error {
 	if err := apictx.Bind(c, &req); err != nil {
 		return err
 	}
-	if err := h.svc.UpdateWashService(c.Request.Context(), id, req.input()); err != nil {
+	if err := h.svc.UpdateWashService(c.Request.Context(), apictx.TenantID(c), id, req.input()); err != nil {
 		return err
 	}
 
-	ws, err := h.svc.GetWashService(c.Request.Context(), id)
+	ws, err := h.svc.GetWashService(c.Request.Context(), apictx.TenantID(c), id)
 	if err != nil {
 		return err
 	}
@@ -102,7 +102,7 @@ func (r locationRequest) input() service.LocationInput {
 }
 
 func (h *catalogController) ListLocations(c *gin.Context) error {
-	items, err := h.svc.ListLocations(c.Request.Context(), false)
+	items, err := h.svc.ListLocations(c.Request.Context(), apictx.TenantID(c), false)
 	if err != nil {
 		return err
 	}
@@ -115,7 +115,7 @@ func (h *catalogController) CreateLocation(c *gin.Context) error {
 	if err := apictx.Bind(c, &req); err != nil {
 		return err
 	}
-	l, err := h.svc.CreateLocation(c.Request.Context(), req.input())
+	l, err := h.svc.CreateLocation(c.Request.Context(), apictx.TenantID(c), req.input())
 	if err != nil {
 		return err
 	}
@@ -132,11 +132,11 @@ func (h *catalogController) UpdateLocation(c *gin.Context) error {
 	if err := apictx.Bind(c, &req); err != nil {
 		return err
 	}
-	if err := h.svc.UpdateLocation(c.Request.Context(), id, req.input()); err != nil {
+	if err := h.svc.UpdateLocation(c.Request.Context(), apictx.TenantID(c), id, req.input()); err != nil {
 		return err
 	}
 
-	l, err := h.svc.GetLocation(c.Request.Context(), id)
+	l, err := h.svc.GetLocation(c.Request.Context(), apictx.TenantID(c), id)
 	if err != nil {
 		return err
 	}

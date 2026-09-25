@@ -9,6 +9,7 @@ package apictx
 import (
 	"time"
 
+	"github.com/eandstravel/carwash/internal/entitlement"
 	"github.com/eandstravel/carwash/internal/middleware"
 	"github.com/eandstravel/carwash/internal/models"
 	"github.com/eandstravel/carwash/pkg/apierr"
@@ -149,4 +150,33 @@ func DateRange(c *gin.Context, loc *time.Location) (time.Time, time.Time, error)
 		return time.Time{}, time.Time{}, apierr.ValidationFailed("the range cannot be longer than 92 days")
 	}
 	return from, to, nil
+}
+
+// TenantID is the business this request belongs to, resolved by
+// middleware.Tenant.Require from the X-API-Key header.
+//
+// It panics on a route without that middleware, deliberately — the same
+// reasoning as UserID. A zero ObjectID here would not scope a query to
+// nobody, which is merely useless; it would scope it to whatever rows happen
+// to carry a zero tenant, which is worse than useless.
+func TenantID(c *gin.Context) primitive.ObjectID {
+	id, ok := middleware.TenantFrom(c)
+	if !ok {
+		panic("apictx.TenantID called on a route without the tenant middleware")
+	}
+	return id
+}
+
+// Entitlement is what this tenant's plan permits, already fetched by the
+// tenant middleware. Using it saves a second call to the platform for
+// something the request has paid for once.
+//
+// Service-layer limit checks read it from here. Middleware cannot do those:
+// it sees a request, not a row count.
+func Entitlement(c *gin.Context) entitlement.Entitlement {
+	ent, ok := middleware.EntitlementFrom(c)
+	if !ok {
+		panic("apictx.Entitlement called on a route without the tenant middleware")
+	}
+	return ent
 }

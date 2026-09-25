@@ -31,7 +31,7 @@ type CarInput struct {
 	Notes string
 }
 
-func (s *CarService) Register(ctx context.Context, ownerID primitive.ObjectID, in CarInput) (*models.Car, error) {
+func (s *CarService) Register(ctx context.Context, tenantID primitive.ObjectID, ownerID primitive.ObjectID, in CarInput) (*models.Car, error) {
 	plate := repository.NormalizePlate(in.Plate)
 	if plate == "" {
 		return nil, apierr.ValidationFailed("plate is required")
@@ -41,12 +41,13 @@ func (s *CarService) Register(ctx context.Context, ownerID primitive.ObjectID, i
 	}
 
 	c := &models.Car{
-		OwnerID: ownerID,
-		Plate:   plate,
-		Make:    strings.TrimSpace(in.Make),
-		Model:   strings.TrimSpace(in.Model),
-		Color:   strings.TrimSpace(in.Color),
-		Notes:   strings.TrimSpace(in.Notes),
+		TenantID: tenantID,
+		OwnerID:  ownerID,
+		Plate:    plate,
+		Make:     strings.TrimSpace(in.Make),
+		Model:    strings.TrimSpace(in.Model),
+		Color:    strings.TrimSpace(in.Color),
+		Notes:    strings.TrimSpace(in.Notes),
 	}
 	if err := s.cars.Create(ctx, c); err != nil {
 		if errors.Is(err, repository.ErrDuplicate) {
@@ -57,16 +58,16 @@ func (s *CarService) Register(ctx context.Context, ownerID primitive.ObjectID, i
 	return c, nil
 }
 
-func (s *CarService) ListMine(ctx context.Context, ownerID primitive.ObjectID) ([]*models.Car, error) {
-	out, err := s.cars.ListByOwner(ctx, ownerID)
+func (s *CarService) ListMine(ctx context.Context, tenantID primitive.ObjectID, ownerID primitive.ObjectID) ([]*models.Car, error) {
+	out, err := s.cars.ListByOwner(ctx, tenantID, ownerID)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
 	return out, nil
 }
 
-func (s *CarService) GetMine(ctx context.Context, id, ownerID primitive.ObjectID) (*models.Car, error) {
-	c, err := s.cars.FindByIDForOwner(ctx, id, ownerID)
+func (s *CarService) GetMine(ctx context.Context, tenantID primitive.ObjectID, id, ownerID primitive.ObjectID) (*models.Car, error) {
+	c, err := s.cars.FindByIDForOwner(ctx, tenantID, id, ownerID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			// 404 rather than 403, for a car that exists but belongs to
@@ -79,7 +80,7 @@ func (s *CarService) GetMine(ctx context.Context, id, ownerID primitive.ObjectID
 	return c, nil
 }
 
-func (s *CarService) Update(ctx context.Context, id, ownerID primitive.ObjectID, in CarInput) error {
+func (s *CarService) Update(ctx context.Context, tenantID primitive.ObjectID, id, ownerID primitive.ObjectID, in CarInput) error {
 	set := bson.M{}
 	if strings.TrimSpace(in.Plate) != "" {
 		set["plate"] = in.Plate
@@ -100,7 +101,7 @@ func (s *CarService) Update(ctx context.Context, id, ownerID primitive.ObjectID,
 		return apierr.ValidationFailed("no fields to update")
 	}
 
-	if err := s.cars.Update(ctx, id, ownerID, set); err != nil {
+	if err := s.cars.Update(ctx, tenantID, id, ownerID, set); err != nil {
 		switch {
 		case errors.Is(err, repository.ErrNotFound):
 			return apierr.NotFound("car")
@@ -113,8 +114,8 @@ func (s *CarService) Update(ctx context.Context, id, ownerID primitive.ObjectID,
 	return nil
 }
 
-func (s *CarService) Delete(ctx context.Context, id, ownerID primitive.ObjectID) error {
-	if err := s.cars.Delete(ctx, id, ownerID); err != nil {
+func (s *CarService) Delete(ctx context.Context, tenantID primitive.ObjectID, id, ownerID primitive.ObjectID) error {
+	if err := s.cars.Delete(ctx, tenantID, id, ownerID); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return apierr.NotFound("car")
 		}

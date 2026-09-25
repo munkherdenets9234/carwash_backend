@@ -11,6 +11,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"os"
 	"time"
 
@@ -40,6 +41,19 @@ func main() {
 
 	_ = godotenv.Load()
 	cfg := config.Load()
+
+	// The seed writes one demo business. Which one has to be stated: rows
+	// with no tenant are rows the API can never return, because every query
+	// it makes is scoped.
+	if cfg.BootstrapTenantID == "" {
+		fmt.Fprintln(os.Stderr, "seed: BOOTSTRAP_TENANT_ID is required — it is the tenant every seeded row belongs to")
+		os.Exit(1)
+	}
+	tenantID, err := primitive.ObjectIDFromHex(cfg.BootstrapTenantID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "seed: BOOTSTRAP_TENANT_ID is not a valid id:", cfg.BootstrapTenantID)
+		os.Exit(1)
+	}
 	if err := cfg.Validate(); err != nil {
 		exit(err)
 	}
@@ -58,7 +72,7 @@ func main() {
 	}
 	db := client.Database(cfg.MongoDB)
 
-	if err := run(ctx, db, cfg, *reset); err != nil {
+	if err := run(ctx, db, cfg, tenantID, *reset); err != nil {
 		exit(err)
 	}
 
@@ -74,7 +88,7 @@ func exit(err error) {
 
 var collections = []string{"users", "cars", "locations", "wash_services", "shifts", "reservations", "time_entries"}
 
-func run(ctx context.Context, db *mongo.Database, cfg *config.Config, reset bool) error {
+func run(ctx context.Context, db *mongo.Database, cfg *config.Config, tenantID primitive.ObjectID, reset bool) error {
 	users := repository.NewUserRepo(db)
 
 	existing, err := db.Collection("users").CountDocuments(ctx, map[string]any{})
@@ -110,11 +124,11 @@ func run(ctx context.Context, db *mongo.Database, cfg *config.Config, reset bool
 	// Real coordinates in Ulaanbaatar, so the geofence demo works with a
 	// phone's actual GPS if you happen to be there, and with the console's
 	// typed coordinates if you are not.
-	central := &models.Location{
+	central := &models.Location{TenantID: tenantID,
 		Name: "Central — Sukhbaatar Square", Address: "Sukhbaatar District, Ulaanbaatar",
 		Point: models.GeoPoint{Lat: 47.918730, Lng: 106.917700}, GeofenceRadiusM: 120, Active: true,
 	}
-	zaisan := &models.Location{
+	zaisan := &models.Location{TenantID: tenantID,
 		Name: "Zaisan", Address: "Khan-Uul District, Ulaanbaatar",
 		Point: models.GeoPoint{Lat: 47.887000, Lng: 106.918000}, GeofenceRadiusM: 150, Active: true,
 	}
@@ -125,13 +139,13 @@ func run(ctx context.Context, db *mongo.Database, cfg *config.Config, reset bool
 	}
 
 	// ── Price list ───────────────────────────────────────────────────────
-	express := &models.WashService{Name: "Express exterior", Description: "Outside only, machine wash and dry",
+	express := &models.WashService{TenantID: tenantID, Name: "Express exterior", Description: "Outside only, machine wash and dry",
 		DurationMin: 30, PriceMNT: 18000, BonusMNT: 2000, Active: true}
-	standard := &models.WashService{Name: "Standard wash", Description: "Exterior plus interior vacuum",
+	standard := &models.WashService{TenantID: tenantID, Name: "Standard wash", Description: "Exterior plus interior vacuum",
 		DurationMin: 60, PriceMNT: 30000, BonusMNT: 4000, Active: true}
-	full := &models.WashService{Name: "Full valet", Description: "Exterior, interior, wax and trim",
+	full := &models.WashService{TenantID: tenantID, Name: "Full valet", Description: "Exterior, interior, wax and trim",
 		DurationMin: 120, PriceMNT: 75000, BonusMNT: 12000, Active: true}
-	engine := &models.WashService{Name: "Engine bay clean", Description: "Seasonal — withdrawn for winter",
+	engine := &models.WashService{TenantID: tenantID, Name: "Engine bay clean", Description: "Seasonal — withdrawn for winter",
 		DurationMin: 45, PriceMNT: 25000, BonusMNT: 3500, Active: false}
 	for _, s := range []*models.WashService{express, standard, full, engine} {
 		if err := services.Create(ctx, s); err != nil {
@@ -146,7 +160,8 @@ func run(ctx context.Context, db *mongo.Database, cfg *config.Config, reset bool
 			return nil, err
 		}
 		u := &models.User{
-			Role: role, Name: name, Email: email, Phone: phone,
+			TenantID: tenantID,
+			Role:     role, Name: name, Email: email, Phone: phone,
 			PasswordHash: hash, Status: models.UserActive,
 		}
 		if home != nil {
@@ -183,10 +198,10 @@ func run(ctx context.Context, db *mongo.Database, cfg *config.Config, reset bool
 	}
 
 	// ── Cars ─────────────────────────────────────────────────────────────
-	prius := &models.Car{OwnerID: cust1.ID, Plate: "1234UBA", Make: "Toyota", Model: "Prius 30", Color: "white"}
-	lexus := &models.Car{OwnerID: cust1.ID, Plate: "5678UBB", Make: "Lexus", Model: "RX 350", Color: "black",
+	prius := &models.Car{TenantID: tenantID, OwnerID: cust1.ID, Plate: "1234UBA", Make: "Toyota", Model: "Prius 30", Color: "white"}
+	lexus := &models.Car{TenantID: tenantID, OwnerID: cust1.ID, Plate: "5678UBB", Make: "Lexus", Model: "RX 350", Color: "black",
 		Notes: "Alloy wheels — no harsh brushes"}
-	crv := &models.Car{OwnerID: cust2.ID, Plate: "9012UBE", Make: "Honda", Model: "CR-V", Color: "silver"}
+	crv := &models.Car{TenantID: tenantID, OwnerID: cust2.ID, Plate: "9012UBE", Make: "Honda", Model: "CR-V", Color: "silver"}
 	for _, c := range []*models.Car{prius, lexus, crv} {
 		if err := cars.Create(ctx, c); err != nil {
 			return fmt.Errorf("car %s: %w", c.Plate, err)
@@ -215,6 +230,7 @@ func run(ctx context.Context, db *mongo.Database, cfg *config.Config, reset bool
 		d := dayStart.AddDate(0, 0, day)
 		for _, r := range roster {
 			sh := &models.Shift{
+				TenantID:   tenantID,
 				EmployeeID: r.emp.ID,
 				LocationID: r.site.ID,
 				StartAt:    d.Add(time.Duration(r.startHr) * time.Hour).UTC(),
@@ -251,6 +267,7 @@ func run(ctx context.Context, db *mongo.Database, cfg *config.Config, reset bool
 		}
 
 		res := &models.Reservation{
+			TenantID:   tenantID,
 			CustomerID: customerID,
 			EmployeeID: d.emp.ID,
 			CarID:      d.car.ID,
@@ -279,6 +296,7 @@ func run(ctx context.Context, db *mongo.Database, cfg *config.Config, reset bool
 		upcoming = dayStart.AddDate(0, 0, 1).Add(11 * time.Hour).UTC()
 	}
 	live := &models.Reservation{
+		TenantID:   tenantID,
 		CustomerID: cust2.ID,
 		EmployeeID: bat.ID,
 		CarID:      crv.ID,
@@ -301,13 +319,14 @@ func run(ctx context.Context, db *mongo.Database, cfg *config.Config, reset bool
 		in := dayStart.Add(time.Duration(inHr) * time.Hour).UTC()
 		out := dayStart.Add(time.Duration(outHr) * time.Hour).UTC()
 		e := &models.TimeEntry{
+			TenantID:   tenantID,
 			EmployeeID: emp.ID, LocationID: site.ID,
 			ClockInAt: in, ClockInPoint: site.Point, ClockInDistanceM: 14,
 		}
 		if err := entries.Create(ctx, e); err != nil {
 			return err
 		}
-		return entries.Close(ctx, e.ID, out, site.Point, 22, int(out.Sub(in).Minutes()))
+		return entries.Close(ctx, tenantID, e.ID, out, site.Point, 22, int(out.Sub(in).Minutes()))
 	}
 	if err := closed(saran, central, 10, 19); err != nil {
 		return fmt.Errorf("time entry saran: %w", err)

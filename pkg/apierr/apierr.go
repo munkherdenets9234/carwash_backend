@@ -34,6 +34,15 @@ const (
 	DomainSchedule    = "SCHEDULE"    // shifts and availability
 	DomainReservation = "RESERVATION" // bookings made against a slot
 	DomainAttendance  = "ATTENDANCE"  // clock-in / clock-out
+
+	// DomainTenant covers resolving which customer of the platform a request
+	// belongs to, and DomainSubscription covers what their plan permits.
+	// Separate from AUTH because they answer a different question: AUTH is
+	// "who are you", these are "which business is this" and "what have they
+	// bought". An alert that lumps them together cannot tell a bad password
+	// from an expired plan.
+	DomainTenant       = "TENANT"
+	DomainSubscription = "SUBSCRIPTION"
 )
 
 // Code constants are the machine-readable error identifiers. Clients branch on
@@ -65,6 +74,30 @@ const (
 	// the right response is "move closer", not "fix your input", and the app
 	// shows the measured distance rather than a form error.
 	CodeOutsideGeofence = "OUTSIDE_GEOFENCE"
+
+	// ── Entitlement, once this service runs inside the platform ──────────
+	//
+	// All three are 402 rather than 403: the caller is not permanently
+	// barred, they are one plan change away, and a client should offer that
+	// rather than an apology. They are kept distinct from one another
+	// because the sentence a client shows differs for each.
+
+	// CodeSubscriptionRequired accompanies 402 when the tenant's
+	// subscription is expired, past due or cancelled.
+	CodeSubscriptionRequired = "SUBSCRIPTION_REQUIRED"
+
+	// CodeModuleNotEntitled accompanies 402 when the tenant is paying, but
+	// for a plan that does not include the car wash at all.
+	//
+	// Distinct from FEATURE_UNAVAILABLE on purpose: that one means this
+	// deployment was not configured and no amount of paying will help, while
+	// this one means the caller should be shown an upgrade.
+	CodeModuleNotEntitled = "MODULE_NOT_ENTITLED"
+
+	// CodeLimitExceeded accompanies 402 when the request would take the
+	// tenant past a numeric ceiling on their plan — the fourth branch on a
+	// plan that allows three.
+	CodeLimitExceeded = "LIMIT_EXCEEDED"
 
 	// CodeSlotUnavailable accompanies 409 when the requested employee is not
 	// free for the whole of the requested window — off shift, already booked,
@@ -219,6 +252,32 @@ func FeatureUnavailable(feature string) *APIError {
 func OutsideGeofence(distanceM, radiusM float64) *APIError {
 	return New(http.StatusUnprocessableEntity, DomainAttendance, CodeOutsideGeofence,
 		fmt.Sprintf("you are %.0f m from the site; clock-in is allowed within %.0f m", distanceM, radiusM))
+}
+
+// SubscriptionRequired reports a tenant whose subscription does not permit
+// this action. Mutating calls only — a lapsed tenant can still read, so they
+// can see their data and reach the page that fixes their billing.
+func SubscriptionRequired(msg string) *APIError {
+	if msg == "" {
+		msg = "this subscription is inactive or expired"
+	}
+	return New(http.StatusPaymentRequired, DomainSubscription, CodeSubscriptionRequired, msg)
+}
+
+// ModuleNotEntitled reports a plan that does not include this product. The
+// module name is in the message so an upgrade prompt can name it.
+func ModuleNotEntitled(module string) *APIError {
+	return New(http.StatusPaymentRequired, DomainSubscription, CodeModuleNotEntitled,
+		"this plan does not include "+module)
+}
+
+// LimitExceeded reports a request that would take the tenant past a ceiling
+// on their plan. resource is this product's own name for what is being
+// counted; limit is the ceiling, included so a client can say how far they
+// have got rather than only that they have stopped.
+func LimitExceeded(resource string, limit int) *APIError {
+	return New(http.StatusPaymentRequired, DomainSubscription, CodeLimitExceeded,
+		fmt.Sprintf("this plan allows at most %d %s", limit, resource))
 }
 
 // SlotUnavailable reports a reservation request the schedule cannot satisfy.

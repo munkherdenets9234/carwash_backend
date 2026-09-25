@@ -37,7 +37,7 @@ func NewAttendanceService(
 }
 
 // ClockIn opens a time entry, if the employee is where they say they are.
-func (s *AttendanceService) ClockIn(ctx context.Context, employeeID primitive.ObjectID, locationID string, lat, lng float64) (*models.TimeEntry, error) {
+func (s *AttendanceService) ClockIn(ctx context.Context, tenantID primitive.ObjectID, employeeID primitive.ObjectID, locationID string, lat, lng float64) (*models.TimeEntry, error) {
 	locID, err := primitive.ObjectIDFromHex(locationID)
 	if err != nil {
 		return nil, apierr.BadRequest("location_id is not a valid id")
@@ -50,7 +50,7 @@ func (s *AttendanceService) ClockIn(ctx context.Context, employeeID primitive.Ob
 			In(apierr.DomainAttendance)
 	}
 
-	loc, err := s.locations.FindByID(ctx, locID)
+	loc, err := s.locations.FindByID(ctx, tenantID, locID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("location").In(apierr.DomainCatalog)
@@ -67,6 +67,7 @@ func (s *AttendanceService) ClockIn(ctx context.Context, employeeID primitive.Ob
 	}
 
 	entry := &models.TimeEntry{
+		TenantID:         tenantID,
 		EmployeeID:       employeeID,
 		LocationID:       locID,
 		ClockInAt:        s.now(),
@@ -93,8 +94,8 @@ func (s *AttendanceService) ClockIn(ctx context.Context, employeeID primitive.Ob
 // manager to fix by hand. A clock-out from the wrong place is a question for
 // a person to look at, which is what recording the distance makes possible;
 // it is not a reason to jam the timesheet.
-func (s *AttendanceService) ClockOut(ctx context.Context, employeeID primitive.ObjectID, lat, lng float64) (*models.TimeEntry, error) {
-	entry, err := s.entries.FindOpen(ctx, employeeID)
+func (s *AttendanceService) ClockOut(ctx context.Context, tenantID primitive.ObjectID, employeeID primitive.ObjectID, lat, lng float64) (*models.TimeEntry, error) {
+	entry, err := s.entries.FindOpen(ctx, tenantID, employeeID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.Conflict("you are not clocked in").In(apierr.DomainAttendance)
@@ -106,7 +107,7 @@ func (s *AttendanceService) ClockOut(ctx context.Context, employeeID primitive.O
 	distance := math.NaN()
 	if geo.ValidCoordinate(lat, lng) {
 		point = models.GeoPoint{Lat: lat, Lng: lng}
-		if loc, err := s.locations.FindByID(ctx, entry.LocationID); err == nil {
+		if loc, err := s.locations.FindByID(ctx, tenantID, entry.LocationID); err == nil {
 			distance = math.Round(geo.DistanceM(lat, lng, loc.Point.Lat, loc.Point.Lng))
 		}
 	}
@@ -123,7 +124,7 @@ func (s *AttendanceService) ClockOut(ctx context.Context, employeeID primitive.O
 		worked = 0
 	}
 
-	if err := s.entries.Close(ctx, entry.ID, at, point, distance, worked); err != nil {
+	if err := s.entries.Close(ctx, tenantID, entry.ID, at, point, distance, worked); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			// Someone else closed it between the read and the write.
 			return nil, apierr.Conflict("you are not clocked in").In(apierr.DomainAttendance)
@@ -140,8 +141,8 @@ func (s *AttendanceService) ClockOut(ctx context.Context, employeeID primitive.O
 
 // Current returns the employee's running entry, or nil when clocked out.
 // Nil is not an error: "not clocked in" is a normal state the app renders.
-func (s *AttendanceService) Current(ctx context.Context, employeeID primitive.ObjectID) (*models.TimeEntry, error) {
-	entry, err := s.entries.FindOpen(ctx, employeeID)
+func (s *AttendanceService) Current(ctx context.Context, tenantID primitive.ObjectID, employeeID primitive.ObjectID) (*models.TimeEntry, error) {
+	entry, err := s.entries.FindOpen(ctx, tenantID, employeeID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, nil
@@ -152,8 +153,8 @@ func (s *AttendanceService) Current(ctx context.Context, employeeID primitive.Ob
 }
 
 // Timesheet returns the entries in a window, narrowed as the query says.
-func (s *AttendanceService) Timesheet(ctx context.Context, q repository.TimeEntryQuery) ([]*models.TimeEntry, error) {
-	out, err := s.entries.List(ctx, q)
+func (s *AttendanceService) Timesheet(ctx context.Context, tenantID primitive.ObjectID, q repository.TimeEntryQuery) ([]*models.TimeEntry, error) {
+	out, err := s.entries.List(ctx, tenantID, q)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}

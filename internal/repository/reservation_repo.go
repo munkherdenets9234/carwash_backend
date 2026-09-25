@@ -28,6 +28,35 @@ var blockingStatuses = bson.A{
 	models.ReservationCompleted,
 }
 
+// FindByReference resolves one booking from the code a guest was given.
+//
+// The phone number is part of the FILTER rather than checked after the read.
+// That is the difference between a lookup and an authorisation check
+// somebody can forget to write: a mismatched number cannot return a row at
+// all, so there is no path where the booking is loaded and then compared.
+//
+// Both halves are required because neither is sufficient. The code alone is
+// a secret that may be forwarded, screenshotted or left in a chat; the phone
+// number alone is not a secret at all.
+func (r *ReservationRepo) FindByReference(ctx context.Context, tenantID primitive.ObjectID, reference string, customerID primitive.ObjectID) (*models.Reservation, error) {
+	key := models.ReferenceKey(tenantID, reference)
+	if key == "" {
+		return nil, ErrNotFound
+	}
+	var res models.Reservation
+	// Queried by the indexed key, so the lookup a stranger can drive is an
+	// index hit rather than a scan — which matters on the one public route
+	// where a wrong answer is worth retrying.
+	err := r.col.FindOne(ctx, scoped(tenantID, bson.M{
+		"reference_key": key,
+		"customer_id":   customerID,
+	})).Decode(&res)
+	if err != nil {
+		return nil, translate(err)
+	}
+	return &res, nil
+}
+
 func (r *ReservationRepo) Create(ctx context.Context, res *models.Reservation) error {
 	now := time.Now().UTC()
 	res.ID = primitive.NewObjectID()
@@ -40,7 +69,7 @@ func (r *ReservationRepo) Create(ctx context.Context, res *models.Reservation) e
 // ListBlockingForEmployees returns the reservations that occupy time for the
 // given employees inside [from, to). This is what availability subtracts from
 // the roster, and what the booking overlap check reads.
-func (r *ReservationRepo) ListBlockingForEmployees(ctx context.Context, employeeIDs []primitive.ObjectID, from, to time.Time) ([]*models.Reservation, error) {
+func (r *ReservationRepo) ListBlockingForEmployees(ctx context.Context, tenantID primitive.ObjectID, employeeIDs []primitive.ObjectID, from, to time.Time) ([]*models.Reservation, error) {
 	if len(employeeIDs) == 0 {
 		return nil, nil
 	}
@@ -52,7 +81,7 @@ func (r *ReservationRepo) ListBlockingForEmployees(ctx context.Context, employee
 		"start_at": bson.M{"$lt": to},
 		"end_at":   bson.M{"$gt": from},
 	}
-	cur, err := r.col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "start_at", Value: 1}}))
+	cur, err := r.col.Find(ctx, scoped(tenantID, filter), options.Find().SetSort(bson.D{{Key: "start_at", Value: 1}}))
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -75,7 +104,7 @@ type ReservationQuery struct {
 }
 
 // List returns reservations overlapping [From, To), newest first.
-func (r *ReservationRepo) List(ctx context.Context, q ReservationQuery) ([]*models.Reservation, error) {
+func (r *ReservationRepo) List(ctx context.Context, tenantID primitive.ObjectID, q ReservationQuery) ([]*models.Reservation, error) {
 	filter := bson.M{
 		"start_at": bson.M{"$lt": q.To},
 		"end_at":   bson.M{"$gt": q.From},
@@ -93,7 +122,7 @@ func (r *ReservationRepo) List(ctx context.Context, q ReservationQuery) ([]*mode
 		filter["status"] = *q.Status
 	}
 
-	cur, err := r.col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "start_at", Value: 1}}))
+	cur, err := r.col.Find(ctx, scoped(tenantID, filter), options.Find().SetSort(bson.D{{Key: "start_at", Value: 1}}))
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -106,9 +135,9 @@ func (r *ReservationRepo) List(ctx context.Context, q ReservationQuery) ([]*mode
 	return out, nil
 }
 
-func (r *ReservationRepo) FindByID(ctx context.Context, id primitive.ObjectID) (*models.Reservation, error) {
+func (r *ReservationRepo) FindByID(ctx context.Context, tenantID, id primitive.ObjectID) (*models.Reservation, error) {
 	var res models.Reservation
-	if err := r.col.FindOne(ctx, bson.M{"_id": id}).Decode(&res); err != nil {
+	if err := r.col.FindOne(ctx, scopedID(tenantID, id)).Decode(&res); err != nil {
 		return nil, translate(err)
 	}
 	return &res, nil
@@ -116,9 +145,9 @@ func (r *ReservationRepo) FindByID(ctx context.Context, id primitive.ObjectID) (
 
 // FindByIDForCustomer scopes to the owner in the query, for the same reason
 // CarRepo.FindByIDForOwner does.
-func (r *ReservationRepo) FindByIDForCustomer(ctx context.Context, id, customerID primitive.ObjectID) (*models.Reservation, error) {
+func (r *ReservationRepo) FindByIDForCustomer(ctx context.Context, tenantID, id, customerID primitive.ObjectID) (*models.Reservation, error) {
 	var res models.Reservation
-	if err := r.col.FindOne(ctx, bson.M{"_id": id, "customer_id": customerID}).Decode(&res); err != nil {
+	if err := r.col.FindOne(ctx, scoped(tenantID, bson.M{"_id": id, "customer_id": customerID})).Decode(&res); err != nil {
 		return nil, translate(err)
 	}
 	return &res, nil
@@ -126,9 +155,9 @@ func (r *ReservationRepo) FindByIDForCustomer(ctx context.Context, id, customerI
 
 // UpdateFields applies set to one reservation, refusing a miss rather than
 // reporting success for a row that does not exist.
-func (r *ReservationRepo) UpdateFields(ctx context.Context, id primitive.ObjectID, set bson.M) error {
+func (r *ReservationRepo) UpdateFields(ctx context.Context, tenantID, id primitive.ObjectID, set bson.M) error {
 	set["updated_at"] = time.Now().UTC()
-	res, err := r.col.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": set})
+	res, err := r.col.UpdateOne(ctx, scopedID(tenantID, id), bson.M{"$set": set})
 	if err != nil {
 		return translate(err)
 	}
@@ -145,10 +174,10 @@ func (r *ReservationRepo) UpdateFields(ctx context.Context, id primitive.ObjectI
 // that employee, and one that drops its key while still active loses the
 // guard against a double booking. Doing both in a single update makes the
 // pairing structural.
-func (r *ReservationRepo) UpdateAndReleaseSlot(ctx context.Context, id primitive.ObjectID, set bson.M) error {
+func (r *ReservationRepo) UpdateAndReleaseSlot(ctx context.Context, tenantID, id primitive.ObjectID, set bson.M) error {
 	set["updated_at"] = time.Now().UTC()
 	res, err := r.col.UpdateOne(ctx,
-		bson.M{"_id": id},
+		scopedID(tenantID, id),
 		bson.M{"$set": set, "$unset": bson.M{"slot_key": ""}})
 	if err != nil {
 		return translate(err)
@@ -166,12 +195,12 @@ func (r *ReservationRepo) UpdateAndReleaseSlot(ctx context.Context, id primitive
 // finished at 18:20 belongs to the day it was paid for, and a job that ran
 // past midnight belongs to the day it finished. Reporting by booking time
 // would put revenue on a day no money was taken.
-func (r *ReservationRepo) CompletedBetween(ctx context.Context, from, to time.Time) ([]*models.Reservation, error) {
+func (r *ReservationRepo) CompletedBetween(ctx context.Context, tenantID primitive.ObjectID, from, to time.Time) ([]*models.Reservation, error) {
 	filter := bson.M{
 		"status":       models.ReservationCompleted,
 		"completed_at": bson.M{"$gte": from, "$lt": to},
 	}
-	cur, err := r.col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "completed_at", Value: 1}}))
+	cur, err := r.col.Find(ctx, scoped(tenantID, filter), options.Find().SetSort(bson.D{{Key: "completed_at", Value: 1}}))
 	if err != nil {
 		return nil, translate(err)
 	}

@@ -55,7 +55,7 @@ func NewScheduleService(
 const maxShiftHours = 16
 
 // AddShift rosters an employee at a location for a window.
-func (s *ScheduleService) AddShift(ctx context.Context, employeeID, locationID string, start, end time.Time) (*models.Shift, error) {
+func (s *ScheduleService) AddShift(ctx context.Context, tenantID primitive.ObjectID, employeeID, locationID string, start, end time.Time) (*models.Shift, error) {
 	empID, err := primitive.ObjectIDFromHex(employeeID)
 	if err != nil {
 		return nil, apierr.BadRequest("employee_id is not a valid id")
@@ -72,7 +72,7 @@ func (s *ScheduleService) AddShift(ctx context.Context, employeeID, locationID s
 		return nil, apierr.ValidationFailed("a shift cannot be longer than 16 hours")
 	}
 
-	emp, err := s.users.FindByIDAndRole(ctx, empID, models.RoleEmployee)
+	emp, err := s.users.FindByIDAndRole(ctx, tenantID, empID, models.RoleEmployee)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("employee")
@@ -82,7 +82,7 @@ func (s *ScheduleService) AddShift(ctx context.Context, employeeID, locationID s
 	if emp.Status != models.UserActive {
 		return nil, apierr.ValidationFailed("that employee is suspended")
 	}
-	if _, err := s.locations.FindByID(ctx, locID); err != nil {
+	if _, err := s.locations.FindByID(ctx, tenantID, locID); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("location").In(apierr.DomainCatalog)
 		}
@@ -91,7 +91,7 @@ func (s *ScheduleService) AddShift(ctx context.Context, employeeID, locationID s
 
 	// One person cannot be in two places at once, and a roster that says
 	// otherwise produces availability at both.
-	existing, err := s.shifts.List(ctx, repository.ShiftQuery{EmployeeID: &empID, From: start, To: end})
+	existing, err := s.shifts.List(ctx, tenantID, repository.ShiftQuery{EmployeeID: &empID, From: start, To: end})
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
@@ -100,7 +100,7 @@ func (s *ScheduleService) AddShift(ctx context.Context, employeeID, locationID s
 			In(apierr.DomainSchedule)
 	}
 
-	sh := &models.Shift{EmployeeID: empID, LocationID: locID, StartAt: start.UTC(), EndAt: end.UTC()}
+	sh := &models.Shift{TenantID: tenantID, EmployeeID: empID, LocationID: locID, StartAt: start.UTC(), EndAt: end.UTC()}
 	if err := s.shifts.Create(ctx, sh); err != nil {
 		return nil, apierr.Internal(err)
 	}
@@ -108,16 +108,16 @@ func (s *ScheduleService) AddShift(ctx context.Context, employeeID, locationID s
 }
 
 // ListShifts returns the roster for a window, optionally narrowed.
-func (s *ScheduleService) ListShifts(ctx context.Context, q repository.ShiftQuery) ([]*models.Shift, error) {
-	out, err := s.shifts.List(ctx, q)
+func (s *ScheduleService) ListShifts(ctx context.Context, tenantID primitive.ObjectID, q repository.ShiftQuery) ([]*models.Shift, error) {
+	out, err := s.shifts.List(ctx, tenantID, q)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
 	return out, nil
 }
 
-func (s *ScheduleService) DeleteShift(ctx context.Context, id primitive.ObjectID) error {
-	if err := s.shifts.Delete(ctx, id); err != nil {
+func (s *ScheduleService) DeleteShift(ctx context.Context, tenantID primitive.ObjectID, id primitive.ObjectID) error {
+	if err := s.shifts.Delete(ctx, tenantID, id); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return apierr.NotFound("shift").In(apierr.DomainSchedule)
 		}
@@ -156,8 +156,8 @@ type AvailabilityQuery struct {
 // than dropped. "Bat is working today and fully booked" and "Bat is not in
 // today" are different answers, and a customer choosing a specific person
 // needs to be able to tell them apart.
-func (s *ScheduleService) Availability(ctx context.Context, q AvailabilityQuery) ([]EmployeeAvailability, error) {
-	ws, err := s.services.FindByID(ctx, q.ServiceID)
+func (s *ScheduleService) Availability(ctx context.Context, tenantID primitive.ObjectID, q AvailabilityQuery) ([]EmployeeAvailability, error) {
+	ws, err := s.services.FindByID(ctx, tenantID, q.ServiceID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, apierr.NotFound("service").In(apierr.DomainCatalog)
@@ -170,7 +170,7 @@ func (s *ScheduleService) Availability(ctx context.Context, q AvailabilityQuery)
 
 	dayStart, dayEnd := DayRange(q.Day, s.loc)
 
-	shifts, err := s.shifts.List(ctx, repository.ShiftQuery{
+	shifts, err := s.shifts.List(ctx, tenantID, repository.ShiftQuery{
 		EmployeeID: q.EmployeeID,
 		LocationID: q.LocationID,
 		From:       dayStart,
@@ -192,12 +192,12 @@ func (s *ScheduleService) Availability(ctx context.Context, q AvailabilityQuery)
 		byEmployee[sh.EmployeeID] = append(byEmployee[sh.EmployeeID], sh)
 	}
 
-	employees, err := s.users.FindManyByIDs(ctx, ids)
+	employees, err := s.users.FindManyByIDs(ctx, tenantID, ids)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}
 
-	booked, err := s.bookings.ListBlockingForEmployees(ctx, ids, dayStart, dayEnd)
+	booked, err := s.bookings.ListBlockingForEmployees(ctx, tenantID, ids, dayStart, dayEnd)
 	if err != nil {
 		return nil, apierr.Internal(err)
 	}

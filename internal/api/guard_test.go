@@ -16,6 +16,13 @@ import (
 // publicRoutes is the complete list of endpoints that may answer without a
 // bearer token. Everything else the router mounts must refuse one.
 //
+// Since adoption into the platform, "public" means public of a TOKEN only.
+// Every /api/v1 route, including the ones below, now also requires the
+// tenant API key — there is no such thing as an unscoped request to this
+// service any more, because there is no longer one business for an unscoped
+// request to belong to. The operational routes stay genuinely open: a
+// monitor cannot hold a tenant key.
+//
 // This is an allowlist rather than a denylist on purpose. A new private
 // route is covered the moment it is registered, with nothing to remember;
 // making a route public, by contrast, requires editing this list, which is
@@ -32,7 +39,37 @@ var publicRoutes = map[string]bool{
 	"POST /api/v1/auth/register": true,
 	"POST /api/v1/auth/login":    true,
 	"GET /api/v1/services":       true,
-	"GET /api/v1/locations":      true,
+	// Whose car wash this is. Token-free like the price list, and tenant
+	// scoped like everything else: it returns the trading name of whichever
+	// business the API key belongs to, which a visitor reading the page can
+	// already see written on the building.
+	"GET /api/v1/tenant":    true,
+	"GET /api/v1/locations": true,
+	// The shopfront's photographs. Token-free like the price list, and
+	// active-only, so an image the business withdrew is not served to a
+	// visitor even though the back office still lists it.
+	"GET /api/v1/media": true,
+
+	// Booking without an account.
+	//
+	// These four are the feature: a visitor with no token has to be able to
+	// see who is free, book, and find the booking again. They are the only
+	// routes in this service that read or write real business data with no
+	// bearer token at all, so they are the ones to look hardest at when this
+	// list changes.
+	//
+	// What protects them instead of a token: the tenant API key scopes every
+	// one to a single business; the two reads return no personal data beyond
+	// a staff display name (see the public package comment); the write is
+	// rate limited because an anonymous caller has no account to suspend;
+	// and the lookup needs BOTH the reference code and the phone number the
+	// booking was made with, answering the same 404 for a wrong code and for
+	// a right code with the wrong number so it cannot be used to discover
+	// which codes are real.
+	"GET /api/v1/employees":       true,
+	"GET /api/v1/availability":    true,
+	"POST /api/v1/bookings":       true,
+	"GET /api/v1/bookings/lookup": true,
 }
 
 func testServer(t *testing.T) *Server {
@@ -63,6 +100,10 @@ func testServer(t *testing.T) *Server {
 		t.Fatalf("token maker: %v", err)
 	}
 
+	cfg.TenantcoreURL = "http://platform.invalid"
+	cfg.TenantcoreServiceKey = "svc-key"
+	cfg.Module = testModule
+
 	// Every service is nil. Nothing dereferences them, which is the point:
 	// if a request reaches a controller this test would panic rather than
 	// quietly pass, so a missing guard cannot look like a present one.
@@ -70,6 +111,7 @@ func testServer(t *testing.T) *Server {
 		Config: cfg,
 		Log:    zap.NewNop(),
 		Auth:   middleware.NewAuth(maker, nil),
+		Tenant: middleware.NewTenant(stubPlatform{}, testModule),
 	})
 }
 
@@ -93,6 +135,11 @@ func TestEveryPrivateRouteRefusesAnonymousCallers(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			req := httptest.NewRequest(r.Method, concretePath(r.Path), strings.NewReader("{}"))
 			req.Header.Set("Content-Type", "application/json")
+			// A valid tenant key, so this test still measures what it always
+			// measured: the TOKEN guard. Without it every route would refuse
+			// at the tenant gate instead and the auth guards would go
+			// unexercised — a green test proving nothing.
+			req.Header.Set("X-API-Key", keyEntitled)
 			rec := httptest.NewRecorder()
 			engine.ServeHTTP(rec, req)
 

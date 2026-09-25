@@ -44,7 +44,7 @@ type ShiftQuery struct {
 // even though tomorrow's first two hours are covered by it — and availability
 // is built from this list, so the employee would appear unbookable for hours
 // they are actually working.
-func (r *ShiftRepo) List(ctx context.Context, q ShiftQuery) ([]*models.Shift, error) {
+func (r *ShiftRepo) List(ctx context.Context, tenantID primitive.ObjectID, q ShiftQuery) ([]*models.Shift, error) {
 	filter := bson.M{
 		"start_at": bson.M{"$lt": q.To},
 		"end_at":   bson.M{"$gt": q.From},
@@ -56,7 +56,7 @@ func (r *ShiftRepo) List(ctx context.Context, q ShiftQuery) ([]*models.Shift, er
 		filter["location_id"] = *q.LocationID
 	}
 
-	cur, err := r.col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "start_at", Value: 1}}))
+	cur, err := r.col.Find(ctx, scoped(tenantID, filter), options.Find().SetSort(bson.D{{Key: "start_at", Value: 1}}))
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -69,16 +69,16 @@ func (r *ShiftRepo) List(ctx context.Context, q ShiftQuery) ([]*models.Shift, er
 	return out, nil
 }
 
-func (r *ShiftRepo) FindByID(ctx context.Context, id primitive.ObjectID) (*models.Shift, error) {
+func (r *ShiftRepo) FindByID(ctx context.Context, tenantID, id primitive.ObjectID) (*models.Shift, error) {
 	var s models.Shift
-	if err := r.col.FindOne(ctx, bson.M{"_id": id}).Decode(&s); err != nil {
+	if err := r.col.FindOne(ctx, scopedID(tenantID, id)).Decode(&s); err != nil {
 		return nil, translate(err)
 	}
 	return &s, nil
 }
 
-func (r *ShiftRepo) Delete(ctx context.Context, id primitive.ObjectID) error {
-	res, err := r.col.DeleteOne(ctx, bson.M{"_id": id})
+func (r *ShiftRepo) Delete(ctx context.Context, tenantID, id primitive.ObjectID) error {
+	res, err := r.col.DeleteOne(ctx, scopedID(tenantID, id))
 	if err != nil {
 		return translate(err)
 	}
